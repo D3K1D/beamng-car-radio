@@ -1,0 +1,45 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+*.pem
+*.key
+*token*.json
+*credentials*.json
+settings.local.json
+
+# Local tooling and diagnostics
+.local/
+.cache/
+.tmp/
+logs/
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+.vs/
+.idea/
+
+# Build and release artifacts
+bin/
+obj/
+build/
+dist/
+coverage/
+*.zip
+*.exe
+*.dll
+*.pdb
+
+# Private audio and recordings
+local-music/
+recordings/
+captures/
+
+# Operating systems
+Thumbs.db
+Desktop.ini
+.DS_Store

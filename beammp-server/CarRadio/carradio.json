@@ -1,0 +1,5 @@
+{
+  "relay_public_address": "YOUR.PUBLIC.IP.OR.DOMAIN:38800",
+  "relay_port": 38800,
+  "secret": "change-this-to-a-long-random-passcode"
+}

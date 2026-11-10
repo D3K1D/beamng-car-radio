@@ -1,0 +1,22 @@
+{
+  "domElement": "<car-radio></car-radio>",
+  "name": "CarRadio",
+  "types": [
+    "ui.apps.categories.vehicle_info"
+  ],
+  "description": "Plays a program from your PC (Spotify, Chrome, anything) through your car, in 3D. On CarRadio BeamMP servers you hear other players' cars too. Needs the CarRadio Companion.",
+  "css": {
+    "left": "20px",
+    "top": "120px",
+    "width": "290px",
+    "height": "44px",
+    "min-width": "200px",
+    "min-height": "40px"
+  },
+  "author": "D3K1D",
+  "version": "0.1.0",
+  "directive": "carRadio",
+  "category": "General",
+  "isAuxiliary": false,
+  "interactive": "yes"
+}
