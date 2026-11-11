@@ -14,7 +14,7 @@ local socket = require('socket')
 local mime = require('mime')
 
 local logTag = 'carradio'
-local VERSION = '0.1.2'
+local VERSION = '0.2.0'
 local PROTO = 1
 local LINK_PORT = 38742
 
@@ -200,17 +200,22 @@ local function radioState(veh, cam)
   end
   local mapObj = map and map.objects and map.objects[id]
   local damage = mapObj and mapObj.damage or 0
+  local okS, speed = pcall(function() return veh:getVelocity():length() end)
   return {
     rel = toCameraSpace(anchor, cam.pos, cam.right, cam.fwd, cam.up),
     inside = inside,
     damagePerKg = (info.mass and info.mass > 0) and damage / info.mass or nil,
     ignition = core_vehicleBridge.getCachedVehicleData(id, 'ignitionLevel'),
     length = info.length,
+    speed = okS and speed or 0, -- m/s, for "louder with speed"
   }
 end
 
 -- ---------------------------------------------------------------- own radio
 local radio = { on = false, vehId = nil }
+-- This player's radio settings (from the app), shared so everyone hears a car the way its
+-- owner set it: volume, bass, and "tune" (the key of the car whose music it plays: Convoy DJ).
+local ownMeta = { vol = 100, bass = false, tune = '' }
 
 local function currentDrivableVehicle()
   local veh = getPlayerVehicle(0)
@@ -224,10 +229,11 @@ local function setRadioVehicle(veh)
   if veh then vehInfo[radio.vehId] = nil; requestVehicleInfo(veh, true) end
 end
 
--- The radio is on whenever the companion is capturing: like a real car stereo, pausing the
--- music (media buttons) is what silences it. It sits in the car you are driving.
+-- The radio is on whenever the companion is capturing, or while tuned to another player's
+-- music (Convoy DJ): like a real car stereo, pausing the music is what silences it.
+-- It sits in the car you are driving.
 local function updateRadioPower()
-  local want = link.status and link.status.capturing and true or false
+  local want = (link.status and link.status.capturing) or ownMeta.tune ~= '' or false
   if want and not radio.on then
     radio.on = true
     setRadioVehicle(currentDrivableVehicle())
@@ -259,26 +265,41 @@ local function onVehicleReplaced(vehId)
   if vehId == radio.vehId then local veh = be:getObjectByID(vehId); if veh then requestVehicleInfo(veh, true) end end
 end
 
--- Bass level from the UI, forwarded to the radio car's shake extension.
-local function setBass(x, mult)
+-- Bass level from the UI, forwarded to the radio car's vehicle extension together with the
+-- ULTRA multiplier, shake mode (0 off, 1 buzz, 2 lowrider hop) and the light show switch.
+local function setBass(x, mult, mode, lights)
   local veh = radio.vehId and be:getObjectByID(radio.vehId)
-  if veh then veh:queueLuaCommand(string.format('if carradio_bassShake then carradio_bassShake.setLevel(%.3f, %.1f) end', tonumber(x) or 0, tonumber(mult) or 1)) end
+  if veh then
+    veh:queueLuaCommand(string.format('if carradio_bassShake then carradio_bassShake.setLevel(%.3f, %.1f, %d, %s) end',
+      tonumber(x) or 0, tonumber(mult) or 1, tonumber(mode) or 1, lights and 'true' or 'false'))
+  end
 end
 
 -- ---------------------------------------------------------------- BeamMP
--- remotes[key] = last packet time; remoteMeta[key] = { vol, bass } as set by that car's owner.
+-- remotes[key] = last packet time; remoteMeta[key] = { vol, bass, tune, at } as set by that car's owner.
 local mp = { config = nil, nextHello = 0, handlersAdded = false, remotes = {}, remoteMeta = {} }
--- This player's radio settings (from the app), shared so everyone hears a car at its owner's volume.
-local ownMeta = { vol = 100, bass = false }
 local metaSent = { json = nil, at = -100 }
 
 local function inMP()
   return MPCoreNetwork and MPCoreNetwork.isMPSession and MPCoreNetwork.isMPSession() and true or false
 end
 
-local function setMeta(vol, bass)
+local function sanitizeKey(k) return type(k) == 'string' and k:match('^%d+%-%d+$') or '' end
+
+local function setMeta(vol, bass, tune)
   ownMeta.vol = math.max(0, math.min(1000, tonumber(vol) or 100))
   ownMeta.bass = bass and true or false
+  ownMeta.tune = sanitizeKey(tune)
+end
+
+local function ownKey()
+  if radio.on and radio.vehId and getServerVehicleID then return getServerVehicleID(radio.vehId) or '' end
+  return ''
+end
+
+local function ownerName(key)
+  local ok, v = pcall(function() return getVehicleByServerID and getVehicleByServerID(key) end)
+  return ok and type(v) == 'table' and v.ownerName or nil
 end
 
 local function mpUpdate(now)
@@ -301,7 +322,8 @@ local function mpUpdate(now)
       if not ok or type(m) ~= 'table' or type(m.key) ~= 'string' or m.pid == nil then return end
       -- A player may only describe their own cars: keys are "<playerID>-<vehicleID>".
       if m.key:sub(1, #tostring(m.pid) + 1) ~= tostring(m.pid) .. '-' then return end
-      mp.remoteMeta[m.key] = { vol = math.max(0, math.min(1000, tonumber(m.vol) or 100)), bass = m.bass and true or false }
+      mp.remoteMeta[m.key] = { vol = math.max(0, math.min(1000, tonumber(m.vol) or 100)), bass = m.bass and true or false,
+        tune = sanitizeKey(m.tune), at = os.clock() }
     end, 'carradio')
     mp.handlersAdded = true
   end
@@ -312,12 +334,12 @@ local function mpUpdate(now)
     end
     return
   end
-  local key = ''
-  if radio.on and radio.vehId and getServerVehicleID then key = getServerVehicleID(radio.vehId) or '' end
-  sendSession({ relay = mp.config.relay, secret = mp.config.secret, key = key })
-  -- Share this car's volume/bass: on change (at most twice a second) and every 5 s for late joiners.
+  local key = ownKey()
+  -- Only broadcast our own audio while not tuned to someone else's.
+  sendSession({ relay = mp.config.relay, secret = mp.config.secret, key = ownMeta.tune == '' and key or '' })
+  -- Share this car's volume/bass/tune: on change (at most twice a second) and every 5 s for late joiners.
   if key ~= '' and TriggerServerEvent then
-    local json = jsonEncode({ key = key, vol = ownMeta.vol, bass = ownMeta.bass })
+    local json = jsonEncode({ key = key, vol = ownMeta.vol, bass = ownMeta.bass, tune = ownMeta.tune })
     if (json ~= metaSent.json and now - metaSent.at > 0.5) or now - metaSent.at > 5 then
       TriggerServerEvent('carradio_meta', json)
       metaSent.json, metaSent.at = json, now
@@ -358,6 +380,7 @@ local function onUpdate(dtReal)
     relay = link.relay or false,
     mp = inMP(),
     radioOn = radio.on,
+    myKey = ownKey(),
     radios = {},
   }
   if radio.on and radio.vehId then
@@ -365,20 +388,30 @@ local function onUpdate(dtReal)
     if veh then
       local r = radioState(veh, cam)
       r.k = 'own'
+      r.tune = ownMeta.tune
       state.radios[#state.radios + 1] = r
     end
   end
+  -- Other players' radio cars: those whose audio is arriving, plus those tuned to someone
+  -- (Convoy DJ: they play another car's audio and may not send any of their own).
+  local active = {}
   for key, last in pairs(mp.remotes) do
-    if now - last > 3 then
-      mp.remotes[key] = nil
-    elseif getGameVehicleID then
+    if now - last > 3 then mp.remotes[key] = nil else active[key] = true end
+  end
+  for key, meta in pairs(mp.remoteMeta) do
+    if now - meta.at > 12 then mp.remoteMeta[key] = nil elseif meta.tune ~= '' then active[key] = true end
+  end
+  if getGameVehicleID then
+    for key in pairs(active) do
       local gid = getGameVehicleID(key)
       local veh = gid and gid ~= -1 and be:getObjectByID(gid)
       if veh then
         local r = radioState(veh, cam)
         r.k = key
+        r.owner = ownerName(key)
+        r.broadcasting = mp.remotes[key] ~= nil
         local meta = mp.remoteMeta[key]
-        if meta then r.vol, r.bass = meta.vol, meta.bass end
+        if meta then r.vol, r.bass, r.tune = meta.vol, meta.bass, meta.tune end
         state.radios[#state.radios + 1] = r
       end
     end

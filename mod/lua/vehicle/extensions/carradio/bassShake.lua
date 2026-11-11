@@ -24,8 +24,21 @@ local ASSIST_MAX = 25        -- cap (rad/s^2)
 local ASSIST_HOLD = 1.5      -- keep assisting this long after the last shake (s)
 local ASSIST_MAX_TILT_COS = math.cos(math.rad(80))
 
+-- Lowrider hop: on each beat the front or the rear (alternating) is thrown upwards.
+local HOP_G = 30             -- upward acceleration of the hopping half at full drive (g)
+local HOP_TIME = 0.09        -- seconds each hop push lasts
+-- Light show: high beams flash on each beat.
+local FLASH_TIME = 0.15
+local BEAT_MIN_GAP = 0.2     -- seconds between beats at most 5/s
+local BEAT_RATIO = 1.35      -- a beat is a bass hit this far above the recent average
+
 local level, smoothed, kick = 0, 0, 0
 local multiplier = 1 -- ULTRA BASS BOOST = 5
+local mode = 1       -- 0 = no shake, 1 = buzz, 2 = lowrider hop
+local lightShow = false
+local beatAvg, lastBeatT = 0, -100
+local hopUntil, hopFront = -1, true
+local flashing, flashUntil = false, -1
 local nodes = {}
 local totalMass, selMass = 0, 0
 local t, steps = 0, 0
@@ -48,12 +61,33 @@ local function pickNodes()
     nodes[#nodes + 1] = { cid = n.cid, mass = n.nodeWeight, phase = math.random() * twoPi }
     selMass = selMass + n.nodeWeight
   end
+  -- Front or rear half (for the lowrider hop), from where each node sits along the car.
+  local fwd, c = obj:getDirectionVector(), vec3(0, 0, 0)
+  for i = 1, #nodes do nodes[i].pos = obj:getNodePosition(nodes[i].cid); c = c + nodes[i].pos * nodes[i].mass end
+  c = c / math.max(selMass, 1)
+  for i = 1, #nodes do nodes[i].front = (nodes[i].pos - c):dot(fwd) > 0 end
 end
 
-local function setLevel(x, mult)
+local function stopFlash()
+  if flashing then electrics.light_flash_highbeams(false); flashing = false end
+end
+
+-- From the HUD app (via game-engine Lua): bass level, ULTRA multiplier, shake mode, light show.
+local function setLevel(x, mult, newMode, lights)
   multiplier = math.max(0, math.min(5, tonumber(mult) or 1))
+  mode = tonumber(newMode) or 1
+  lightShow = lights and true or false
+  if not lightShow then stopFlash() end
   x = tonumber(x) or 0
   if x > level then kick = math.max(kick, x - level) end -- a rising edge is a bass hit
+  -- Beat detection (shared by the light show and the hop).
+  local isBeat = x > 0.08 and x > beatAvg * BEAT_RATIO and t - lastBeatT > BEAT_MIN_GAP
+  beatAvg = beatAvg + (x - beatAvg) * 0.05
+  if isBeat then
+    lastBeatT = t
+    if lightShow and not flashing then electrics.light_flash_highbeams(true); flashing = true; flashUntil = t + FLASH_TIME end
+    if mode == 2 then hopUntil = t + HOP_TIME; hopFront = not hopFront end
+  end
   level = x
 end
 
@@ -101,7 +135,9 @@ local function onPhysicsStep(dt)
   local applyTime = dt * DECIM
   local up = obj:getDirectionVectorUp()
   local fwd = obj:getDirectionVector()
-  if drive > 0 or kickDrive >= 0.01 then
+  if flashing and t > flashUntil then stopFlash() end
+  if mode == 1 and (drive > 0 or kickDrive >= 0.01) then
+    -- Buzz: every sampled node vibrates (random phases) plus a shared thump on hits.
     lastShakeT = t
     local buzz = MAX_G * 9.81 * drive * drive * multiplier
     local thump = KICK_G * 9.81 * kickDrive * multiplier
@@ -111,10 +147,19 @@ local function onPhysicsStep(dt)
       local a = buzz * math.sin(w + n.phase) + thump
       obj:applyForceVectorTime(n.cid, up * (n.mass * a), applyTime)
     end
+  elseif mode == 2 and t < hopUntil and drive > 0 then
+    -- Lowrider hop: push the front or the rear half up for a moment, alternating each beat.
+    lastShakeT = t
+    local a = HOP_G * 9.81 * math.min(1.5, drive) * (multiplier > 1 and 2 or 1)
+    for i = 1, #nodes do
+      local n = nodes[i]
+      if n.front == hopFront then obj:applyForceVectorTime(n.cid, up * (n.mass * a), applyTime) end
+    end
   end
-  -- Assist while shaking and shortly after (stronger with ULTRA, whose hits are harder).
+  -- Assist while shaking and shortly after (stronger with ULTRA, whose hits are harder;
+  -- softer for the hop, which is meant to pitch the car).
   local since = t - lastShakeT
-  local strength = since < ASSIST_HOLD and math.min(1, 1 - since / ASSIST_HOLD + 0.2) * (multiplier > 1 and 1.6 or 1) or 0
+  local strength = since < ASSIST_HOLD and math.min(1, 1 - since / ASSIST_HOLD + 0.2) * (multiplier > 1 and 1.6 or 1) * (mode == 2 and 0.4 or 1) or 0
   if strength > 0 then uprightAssist(up, fwd, applyTime, strength) else prevUp = nil end
 end
 
@@ -126,8 +171,13 @@ end
 local function onReset()
   level, smoothed, kick = 0, 0, 0
   lastShakeT, prevUp, prevFwd = -100, nil, nil
+  flashing = false -- electrics reset restores the lights itself
 end
 
+-- Never leave the high beams stuck on when the radio stops or moves to another car.
+local function onExtensionUnloaded() stopFlash() end
+
+M.onExtensionUnloaded = onExtensionUnloaded
 M.onExtensionLoaded = onExtensionLoaded
 M.onPhysicsStep = onPhysicsStep
 M.onReset = onReset

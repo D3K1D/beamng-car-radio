@@ -6,7 +6,7 @@
 // jitter buffer (AudioWorklet) and that car's effects chain; car positions/condition
 // arrive as 'CarRadioState' (camera-relative, ~60 Hz).
 (function () {
-  var VERSION = '0.1.2'
+  var VERSION = '0.2.0'
 
   // =====================================================================================
   // Engine
@@ -16,7 +16,8 @@
 
     // ---------------- settings (remembered in this browser profile)
     var CFG_KEY = 'carradio.settings'
-    var defaults = { vol: 100, others: 100, bass: false, ultra: false, damage: true, muffleOwn: true, muffleOthers: true }
+    var defaults = { vol: 100, others: 100, bass: false, ultra: false, damage: true, muffleOwn: true, muffleOthers: true,
+      shakeMode: 'buzz', lights: false, speedVol: false, tune: '' }
     E.cfg = (function () {
       try {
         var saved = JSON.parse(localStorage.getItem(CFG_KEY) || '{}')
@@ -28,12 +29,16 @@
       var c = E.cfg
       c.vol = Math.max(0, Math.min(1000, Number(c.vol) || 0))
       c.others = Math.max(0, Math.min(200, Number(c.others) || 0))
+      if (!/^\d+-\d+$/.test(c.tune || '')) c.tune = ''
       try { localStorage.setItem(CFG_KEY, JSON.stringify(c)) } catch (e) {}
       applyVolumes()
       sendMeta()
+      sendBass(bass.env, true) // shake mode / light show changes reach the car right away
     }
-    // Your car's volume and bass are shared, so others hear your car as you set it.
-    function sendMeta() { bngApi.engineLua('carradio_main.setMeta(' + E.cfg.vol + ',' + (E.cfg.bass ? 'true' : 'false') + ')') }
+    // Your car's volume, bass and "Play in my car" choice are shared, so others hear your car as
+    // you set it. Tuning only applies on a multiplayer server.
+    function activeTune() { var s = E.lastState; return s && s.mp ? (E.cfg.tune || '') : '' }
+    function sendMeta() { bngApi.engineLua('carradio_main.setMeta(' + E.cfg.vol + ',' + (E.cfg.bass ? 'true' : 'false') + ',"' + activeTune() + '")') }
     setInterval(sendMeta, 3000) // also covers a Lua reload
 
     E.media = function (cmd) { ensureAudio(); bngApi.engineLua('carradio_main.media("' + cmd + '")') }
@@ -57,6 +62,7 @@
           processorOptions: Object.assign({}, window.__crDebug && window.__crDebug.limiter) }) // tuning overrides: test pages only
         master.disconnect(); master.connect(limiter); limiter.connect(ctx.destination)
         E.limiter = limiter
+        E.workletOk = true
         return true
       })
       ctx.resume()
@@ -85,11 +91,13 @@
     function gain(v) { var n = ctx.createGain(); n.gain.value = v; return n }
 
     // One car radio: player -> owner volume -> damage -> crash -> power -> bass -> cabin EQ -> muffle -> 3D/even/room.
-    function createChain(key) {
+    // key = the car ('own' or a BeamMP key); source = whose audio it plays ('own' or a key):
+    // normally its own, or another car's when tuned to it (Convoy DJ).
+    function createChain(key, source) {
       var own = key === 'own'
-      var c = { key: key, own: own, lastAudio: performance.now(), roomSize: -1, cond: newCond() }
+      var c = { key: key, own: own, source: source, lastAudio: performance.now(), roomSize: -1, cond: newCond() }
       c.player = new AudioWorkletNode(ctx, 'carradio-player', { numberOfInputs: 0, outputChannelCount: [2],
-        processorOptions: { targetMs: own ? 60 : 250 } }) // other cars: more buffer against network jitter
+        processorOptions: { targetMs: source === 'own' ? 60 : 250 } }) // network audio: more buffer against jitter
       c.level = gain(0.5)
       c.ownerVol = gain(1) // other cars: their owner's volume setting
       c.dmgHP = biquad('highpass', 20); c.dmgLP = biquad('lowpass', 20000)
@@ -154,18 +162,33 @@
 
     function b64ToBytes(b64) { var s = atob(b64), u = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u }
 
+    // Audio arrives per source; every car playing that source decodes it (several cars can be
+    // tuned to the same DJ). Cars themselves are created from the game state.
+    var sourceLast = {} // source -> last packet time
+    E.sourceLast = sourceLast
     $rootScope.$on('CarRadioAudio', function (e, m) {
+      sourceLast[m.k] = performance.now()
       ensureAudio().then(function () {
-        var c = chains[m.k] || createChain(m.k)
-        if (c.broken) { destroyChain(m.k); return }
-        c.lastAudio = performance.now()
-        for (var i = 0; i < m.p.length; i++) {
-          if (c.decoder.state !== 'configured') break
-          c.decoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: c.ts, duration: 20000, data: b64ToBytes(m.p[i]) }))
-          c.ts += 20000
+        for (var key in chains) {
+          var c = chains[key]
+          if (c.source !== m.k) continue
+          if (c.broken) { destroyChain(key); continue }
+          c.lastAudio = performance.now()
+          for (var i = 0; i < m.p.length; i++) {
+            if (c.decoder.state !== 'configured') break
+            c.decoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: c.ts, duration: 20000, data: b64ToBytes(m.p[i]) }))
+            c.ts += 20000
+          }
         }
       })
     })
+
+    // Which audio a car plays: its own, or (Convoy DJ) the car it is tuned to. Tuned to us = our own stream.
+    function sourceFor(r, s) {
+      var tune = r.tune || ''
+      if (!tune) return r.k
+      return tune === s.myKey ? 'own' : tune
+    }
 
     // ---------------- car condition (damage, ignition, size) per chain
     var DMG = { light: 10, heavy: 150, wreck: 500, crashDelta: 2 }
@@ -198,9 +221,12 @@
       var muffleSetting = c.own ? cfg.muffleOwn : cfg.muffleOthers
       c.muffle.frequency.setTargetAtTime(muffleSetting && !inside && !paused ? 900 : 20000, now, 0.08)
       c.out.gain.setTargetAtTime(1, now, 0.05)
-      // Other cars: their owner's volume and bass setting.
+      // Other cars: their owner's volume and bass setting. Louder with speed (your setting, every
+      // car you hear): +0 dB up to 40 km/h rising to +4 dB at 130 km/h, over road and wind noise.
       var bassOn = c.own ? cfg.bass : !!r.bass
-      if (!c.own) c.ownerVol.gain.setTargetAtTime((r.vol != null ? r.vol : 100) / 100, now, 0.05)
+      var speedDb = cfg.speedVol && !paused ? Math.max(0, Math.min(1, ((r.speed || 0) * 3.6 - 40) / 90)) * 4 : 0
+      var ownerVol = c.own ? 1 : (r.vol != null ? r.vol : 100) / 100
+      c.ownerVol.gain.setTargetAtTime(ownerVol * Math.pow(10, speedDb / 20), now, 0.3)
       // Damage
       var dmgOn = cfg.damage && !paused, dpk = r.damagePerKg
       if (!cfg.damage) cond.wrecked = false
@@ -240,17 +266,19 @@
       if (c.own) updateBassShake(c, paused)
     }
 
-    // ---------------- bass shake (own car only)
+    // ---------------- bass shake, lowrider hop and light show (own car only; others see them
+    // through BeamMP's own vehicle sync)
     var BASS_SCALE = 1.4, bass = { env: 0, lastSent: -1, lastAt: 0 }
     function sendBass(x, force) {
       var t = performance.now()
       if (!force && t - bass.lastAt < 33) return
       if (!force && x < 0.01 && bass.lastSent < 0.01) return
       bass.lastSent = x; bass.lastAt = t
-      bngApi.engineLua('carradio_main.setBass(' + x.toFixed(3) + ',' + (E.cfg.ultra ? 5 : 1) + ')')
+      var cfg = E.cfg, mode = cfg.bass ? (cfg.shakeMode === 'hop' ? 2 : 1) : 0
+      bngApi.engineLua('carradio_main.setBass(' + x.toFixed(3) + ',' + (cfg.ultra ? 5 : 1) + ',' + mode + ',' + (cfg.lights ? 'true' : 'false') + ')')
     }
     function updateBassShake(c, paused) {
-      if (!E.cfg.bass || paused) { bass.env = 0; sendBass(0); return }
+      if (!(E.cfg.bass || E.cfg.lights) || paused) { bass.env = 0; sendBass(0); return }
       c.bassMeter.getFloatTimeDomainData(c.bassBuf)
       var sum = 0
       for (var i = 0; i < c.bassBuf.length; i++) sum += c.bassBuf[i] * c.bassBuf[i]
@@ -265,17 +293,19 @@
       E.lastState = s
       if (ctx) {
         if (ctx.state === 'suspended' && tick % 60 === 0) ctx.resume()
-        var seen = {}
+        var seen = {}, now = performance.now()
         for (var i = 0; i < s.radios.length; i++) {
-          var r = s.radios[i], c = chains[r.k]
+          var r = s.radios[i], src = sourceFor(r, s), c = chains[r.k]
           seen[r.k] = true
+          if (c && c.source !== src) { destroyChain(r.k); c = null } // re-tuned (Convoy DJ)
+          // A car gets a chain once its source is actually sending audio.
+          if (!c && E.workletOk && now - (sourceLast[src] || -1e9) < 3000) c = createChain(r.k, src)
           if (c) applyCar(c, r, !!s.paused)
         }
-        var now = performance.now()
         for (var k in chains) {
           var ch = chains[k]
           if (!seen[k]) ch.out.gain.setTargetAtTime(0, ctx.currentTime, 0.1) // car unknown here: silent
-          if (now - ch.lastAudio > 5000) destroyChain(k)
+          if (now - ch.lastAudio > 5000 || (!seen[k] && now - ch.lastAudio > 2000)) destroyChain(k)
         }
       }
       if (++tick % 15 === 0) updateView(s)
@@ -294,6 +324,14 @@
       else if (!s.relay) v.mpText = 'Multiplayer: this server has no CarRadio relay'
       else if (s.relay.state === 'connected') v.mpText = 'Multiplayer: connected, ' + others + ' other radio' + (others === 1 ? '' : 's') + ' nearby'
       else v.mpText = 'Multiplayer: relay ' + s.relay.state + (s.relay.error ? ' (' + s.relay.error + ')' : '')
+      // Convoy DJ: players whose own music is playing (not themselves tuned to someone).
+      v.mp = !!s.mp
+      v.djs = s.radios.filter(function (r) { return r.k !== 'own' && r.broadcasting && !r.tune })
+        .map(function (r) { return { key: r.k, label: (r.owner || 'Player ' + r.k.split('-')[0]) + "'s car" } })
+      var tuned = E.cfg.tune && s.mp
+      v.tuneText = !tuned ? '' : v.djs.some(function (d) { return d.key === E.cfg.tune })
+        ? 'Your car plays ' + v.djs.filter(function (d) { return d.key === E.cfg.tune })[0].label.replace("'s car", "'s music")
+        : 'Waiting for that player’s music…'
       E.viewListeners.forEach(function (f) { f() })
     }
 
@@ -394,8 +432,24 @@
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.muffleOwn" ng-change="E.saveCfg()"> Muffle my car when viewed from outside</label>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.muffleOthers" ng-change="E.saveCfg()"> Muffle other cars from outside</label>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.damage" ng-change="E.saveCfg()"> Damage effects</label>
-  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.bass" ng-change="E.saveCfg()"> Bass boost (shakes the car when loud)</label>
-  <div class="cr-row"><button class="cr-ultra" ng-class="{on: E.cfg.ultra}" ng-click="E.cfg.ultra = !E.cfg.ultra; E.saveCfg()" title="Multiplies the bass shake by 5">ULTRA BASS BOOST{{E.cfg.ultra ? ' ON' : ''}}</button></div>
+  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.speedVol" ng-change="E.saveCfg()"> Louder with speed</label>
+  <div ng-if="E.view.mp">
+    <div class="cr-sec">Convoy DJ</div>
+    <div class="cr-row"><span class="cr-lbl">Play in my car</span>
+      <select class="cr-select" ng-model="E.cfg.tune" ng-change="E.saveCfg()">
+        <option value="">My own music</option>
+        <option ng-repeat="d in E.view.djs" value="{{d.key}}">{{d.label}}</option>
+      </select></div>
+    <div class="cr-hint" ng-if="E.view.tuneText">{{E.view.tuneText}}. Everyone hears it from your car.</div>
+    <div class="cr-hint" ng-if="!E.view.tuneText">Tune in to another player's radio; everyone hears it from your car too.</div>
+  </div>
+  <div class="cr-sec">Party</div>
+  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.lights" ng-change="E.saveCfg()"> Light show (headlights flash to the beat)</label>
+  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.bass" ng-change="E.saveCfg()"> Bass boost (moves the car when loud)</label>
+  <div class="cr-row"><span class="cr-lbl">Shake style</span>
+    <label><input type="radio" value="buzz" ng-model="E.cfg.shakeMode" ng-change="E.saveCfg()"> Buzz</label>
+    <label><input type="radio" value="hop" ng-model="E.cfg.shakeMode" ng-change="E.saveCfg()"> Lowrider hop</label></div>
+  <div class="cr-row"><button class="cr-ultra" ng-class="{on: E.cfg.ultra}" ng-click="E.cfg.ultra = !E.cfg.ultra; E.saveCfg()" title="Multiplies the bass shake / hop">ULTRA BASS BOOST{{E.cfg.ultra ? ' ON' : ''}}</button></div>
 </div>`
 
     var STYLE = `
@@ -414,7 +468,8 @@
 .cr-np { color:#ffb36b; margin-bottom:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 .cr-sec { margin:12px 0 2px; font-size:11px; text-transform:uppercase; letter-spacing:1px; opacity:0.6 }
 .cr-row { display:flex; align-items:center; gap:8px; margin:6px 0 }
-.cr-lbl { width:72px; flex:none }
+.cr-lbl { width:90px; flex:none }
+.cr-select { flex:1; background:#2a2a30; color:#eee; border:1px solid #555; border-radius:4px; padding:2px 4px }
 .cr-hint { font-size:11px; opacity:0.55; margin-top:-2px }
 .cr-dim { opacity:0.7 }
 .cr-warn { color:#ffb36b }
