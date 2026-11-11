@@ -65,5 +65,7 @@ if (-not $iscc) { throw 'Inno Setup 6 (ISCC.exe) not found' }
 if ($LASTEXITCODE) { throw 'installer build failed' }
 
 Write-Host "== checksums"
-Get-ChildItem $dist -File | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content "$dist\SHA256SUMS.txt" -Encoding ascii
+# LF line endings so `sha256sum -c` works on Linux servers too.
+$sums = Get-ChildItem $dist -File | Where-Object { $_.Name -ne 'SHA256SUMS.txt' } | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name }
+[IO.File]::WriteAllText("$dist\SHA256SUMS.txt", (($sums -join "`n") + "`n"), [Text.Encoding]::ASCII)
 Get-ChildItem $dist | Format-Table Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } } -AutoSize
