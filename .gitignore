@@ -43,3 +43,15 @@ captures/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Local-only notes and research (kept on this PC, not on GitHub)
+docs/
+research/
+protocol/
+AGENTS.md
+CLAUDE.md
+.github/
+tools/test/
+
+# Separate project in its own repository
+a2b-race/
