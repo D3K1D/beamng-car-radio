@@ -14,7 +14,7 @@ local socket = require('socket')
 local mime = require('mime')
 
 local logTag = 'carradio'
-local VERSION = '0.2.8'
+local VERSION = '0.2.9'
 local PROTO = 1
 local LINK_PORT = 38742
 
@@ -374,9 +374,34 @@ local CABIN_SPACING = 3.5  -- metres of vehicle length per cabin light
 local CABIN_MAX = 5
 local CABIN_BRIGHTNESS = 0.35 -- of the underglow's: a small enclosed space
 
+-- Light-show summary in the game log every 10 s while it runs (beamng.log), per car: how many
+-- updates arrived, the brightness range and how many colour changes (beats) there were.
+local glowStats, glowStatsAt = {}, 0
+local function noteGlow(t)
+  for key, col in pairs(t) do
+    if type(col) == 'table' then
+      local st = glowStats[key] or { n = 0, lo = math.huge, hi = 0, beats = 0, off = 0 }
+      local lm = tonumber(col[4]) or 0
+      st.n, st.lo, st.hi = st.n + 1, math.min(st.lo, lm), math.max(st.hi, lm)
+      if lm <= 1 then st.off = st.off + 1 end
+      local hue = string.format('%.2f%.2f%.2f', tonumber(col[1]) or 0, tonumber(col[2]) or 0, tonumber(col[3]) or 0)
+      if st.hue and st.hue ~= hue then st.beats = st.beats + 1 end
+      st.hue = hue
+      glowStats[key] = st
+    end
+  end
+  local now = os.clock()
+  if now - glowStatsAt >= 10 then
+    for key, st in pairs(glowStats) do
+      log('I', logTag, string.format('light show %s: %d updates, brightness %d-%d, %d colour changes, %d off (silent)', key, st.n, st.lo == math.huge and 0 or st.lo, st.hi, st.beats, st.off))
+    end
+    glowStats, glowStatsAt = {}, now
+  end
+end
+
 local function setGlow(json)
   local ok, t = pcall(jsonDecode, json)
-  if ok and type(t) == 'table' then glowTargets, glowAt = t, os.clock() end
+  if ok and type(t) == 'table' then glowTargets, glowAt = t, os.clock(); noteGlow(t) end
 end
 
 local function removeGlow(vehId)
@@ -519,14 +544,6 @@ local function onUpdate(dtReal)
       r.tune = ownMeta.tune
       r.lights = ownMeta.lights
       r.glow = ownMeta.glow
-      state.radios[#state.radios + 1] = r
-    end
-  elseif ownMeta.lights then
-    -- Radio off but underglow on: the car you are driving keeps its idle glow.
-    local veh = currentDrivableVehicle()
-    if veh then
-      local r = radioState(veh, cam)
-      r.k, r.lights, r.glow, r.glowOnly = 'own', true, ownMeta.glow, true
       state.radios[#state.radios + 1] = r
     end
   end
