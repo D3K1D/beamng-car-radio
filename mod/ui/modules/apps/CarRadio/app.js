@@ -6,7 +6,7 @@
 // jitter buffer (AudioWorklet) and that car's effects chain; car positions/condition
 // arrive as 'CarRadioState' (camera-relative, ~60 Hz).
 (function () {
-  var VERSION = '0.2.2'
+  var VERSION = '0.2.3'
 
   // =====================================================================================
   // Engine
@@ -376,8 +376,11 @@
       else v.mpText = 'Multiplayer: relay ' + s.relay.state + (s.relay.error ? ' (' + s.relay.error + ')' : '')
       // Convoy DJ: players whose own music is playing (not themselves tuned to someone).
       v.mp = !!s.mp
-      v.djs = s.radios.filter(function (r) { return r.k !== 'own' && r.broadcasting && !r.tune })
+      var djs = s.radios.filter(function (r) { return r.k !== 'own' && r.broadcasting && !r.tune })
         .map(function (r) { return { key: r.k, label: (r.owner || 'Player ' + r.k.split('-')[0]) + "'s car" } })
+        .sort(function (a, b) { return a.label < b.label ? -1 : a.label > b.label ? 1 : 0 })
+      // Only replace the list when it really changed, so the buttons don't flicker or reset.
+      if (JSON.stringify(djs) !== JSON.stringify(v.djs || [])) v.djs = djs
       var tuned = E.cfg.tune && s.mp
       v.tuneText = !tuned ? '' : v.djs.some(function (d) { return d.key === E.cfg.tune })
         ? 'Your car plays ' + v.djs.filter(function (d) { return d.key === E.cfg.tune })[0].label.replace("'s car", "'s music")
@@ -485,13 +488,14 @@
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.speedVol" ng-change="E.saveCfg()"> Louder with speed</label>
   <div ng-if="E.view.mp">
     <div class="cr-sec">Convoy DJ</div>
-    <div class="cr-row"><span class="cr-lbl">Play in my car</span>
-      <select class="cr-select" ng-model="E.cfg.tune" ng-change="E.saveCfg()">
-        <option value="">My own music</option>
-        <option ng-repeat="d in E.view.djs" value="{{d.key}}">{{d.label}}</option>
-      </select></div>
-    <div class="cr-hint" ng-if="E.view.tuneText">{{E.view.tuneText}}. Everyone hears it from your car.</div>
-    <div class="cr-hint" ng-if="!E.view.tuneText">Tune in to another player's radio; everyone hears it from your car too.</div>
+    <div class="cr-hint">Play in my car (everyone hears it from your car):</div>
+    <!-- Buttons, not a <select>: BeamNG's off-screen browser can't show native dropdown lists. -->
+    <div class="cr-dj">
+      <button class="cr-chip" ng-class="{on: !E.cfg.tune}" ng-click="E.cfg.tune = ''; E.saveCfg()">My own music</button>
+      <button class="cr-chip" ng-repeat="d in E.view.djs track by d.key" ng-class="{on: E.cfg.tune === d.key}" ng-click="E.cfg.tune = d.key; E.saveCfg()">{{d.label}}</button>
+    </div>
+    <div class="cr-hint" ng-if="E.view.tuneText">{{E.view.tuneText}}.</div>
+    <div class="cr-hint" ng-if="!E.view.djs.length">No other radios playing yet. Players appear here once their music is on.</div>
   </div>
   <div class="cr-sec">Party</div>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.lights" ng-change="E.saveCfg()"> Underglow light show (colours pulse to the music)</label>
@@ -523,6 +527,9 @@
 .cr-row { display:flex; align-items:center; gap:8px; margin:6px 0 }
 .cr-lbl { width:90px; flex:none }
 .cr-select { flex:1; background:#2a2a30; color:#eee; border:1px solid #555; border-radius:4px; padding:2px 4px }
+.cr-dj { display:flex; flex-wrap:wrap; gap:6px; margin:4px 0 6px }
+.cr-chip { border:1px solid #666; background:#2a2a30; color:#eee; border-radius:14px; padding:4px 10px; cursor:pointer; font-size:12px }
+.cr-chip.on { background:#ff6a00; border-color:#ff6a00; color:#000; font-weight:700 }
 .cr-swatch { width:20px; height:20px; border-radius:10px; border:2px solid transparent; padding:0; cursor:pointer; flex:none }
 .cr-swatch.on { border-color:#fff; box-shadow:0 0 0 1px #000 }
 .cr-hint { font-size:11px; opacity:0.55; margin-top:-2px }

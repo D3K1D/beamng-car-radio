@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>CarRadioRelay</AssemblyName>
-    <Version>0.2.2</Version>
+    <Version>0.2.3</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <TargetFramework>net9.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
