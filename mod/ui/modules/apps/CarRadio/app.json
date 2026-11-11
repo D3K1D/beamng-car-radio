@@ -14,7 +14,7 @@
     "min-height": "40px"
   },
   "author": "D3K1D",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "directive": "carRadio",
   "category": "General",
   "isAuxiliary": false,

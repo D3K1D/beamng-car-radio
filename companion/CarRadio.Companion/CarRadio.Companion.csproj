@@ -8,7 +8,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>CarRadioCompanion</AssemblyName>
-    <Version>0.2.4</Version>
+    <Version>0.2.5</Version>
     <Product>CarRadio Companion</Product>
     <Description>Plays a chosen program's audio through your car in BeamNG.drive.</Description>
     <!-- Release builds: one self-contained exe, no .NET install needed on players' PCs. -->

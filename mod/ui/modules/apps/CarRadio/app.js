@@ -6,7 +6,7 @@
 // jitter buffer (AudioWorklet) and that car's effects chain; car positions/condition
 // arrive as 'CarRadioState' (camera-relative, ~60 Hz).
 (function () {
-  var VERSION = '0.2.4'
+  var VERSION = '0.2.5'
 
   // =====================================================================================
   // Engine
@@ -316,15 +316,22 @@
       for (var i = 0; i < c.bassBuf.length; i++) sum += c.bassBuf[i] * c.bassBuf[i]
       var rms = Math.sqrt(sum / c.bassBuf.length)
       g.env = rms > g.env ? rms : g.env * 0.88
-      if (g.env > 0.015 && g.env > g.avg * 1.35 && now - g.lastBeat > 200) {
+      // Auto-gain: everything is measured against this music's own recent bass peak (slowly
+      // decaying, half-life ~15 s), so the show works the same whether the source program
+      // plays loud or quiet (e.g. YouTube turned down, CarRadio volume turned up).
+      g.peak = Math.max(g.env, (g.peak || 0) * 0.99925)
+      var nrm = g.env / Math.max(g.peak, 1e-5)
+      if (nrm > 0.3 && g.env > g.avg * 1.35 && now - g.lastBeat > 200) {
         g.lastBeat = now; g.flash = 1
         g.hue = (g.hue + 0.15 + Math.random() * 0.2) % 1
       }
       g.avg += (g.env - g.avg) * 0.03
       g.flash *= 0.9
-      // Quiet music -> fade (~0.5 s) to the idle colour; music back -> beat colours again.
-      g.idle = g.idle == null ? 1 : g.idle + ((g.env < 0.01 ? 1 : 0) - g.idle) * 0.04
-      var level = Math.min(1, g.env / 0.15)
+      // Idle colour only for real silence (paused, between songs): bass ~zero or far below
+      // its recent peak. Fades in/out over ~0.5 s; music back -> beat colours again.
+      var silent = g.env < 2e-5 || nrm < 0.03
+      g.idle = g.idle == null ? 1 : g.idle + ((silent ? 1 : 0) - g.idle) * 0.04
+      var level = Math.min(1, nrm)
       var musicLumens = 300 + 2450 * level * (0.45 + 0.55 * g.flash)
       var musicRgb = hsv(g.hue, 1, 1), idleRgb = idleOf(r), k = g.idle
       var rgb = [musicRgb[0] + (idleRgb[0] - musicRgb[0]) * k, musicRgb[1] + (idleRgb[1] - musicRgb[1]) * k, musicRgb[2] + (idleRgb[2] - musicRgb[2]) * k]
