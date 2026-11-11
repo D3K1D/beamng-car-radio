@@ -14,7 +14,7 @@ local socket = require('socket')
 local mime = require('mime')
 
 local logTag = 'carradio'
-local VERSION = '0.1.1'
+local VERSION = '0.1.2'
 local PROTO = 1
 local LINK_PORT = 38742
 
