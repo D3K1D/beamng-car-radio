@@ -6,7 +6,7 @@
 // jitter buffer (AudioWorklet) and that car's effects chain; car positions/condition
 // arrive as 'CarRadioState' (camera-relative, ~60 Hz).
 (function () {
-  var VERSION = '0.2.1'
+  var VERSION = '0.2.2'
 
   // =====================================================================================
   // Engine
@@ -17,7 +17,7 @@
     // ---------------- settings (remembered in this browser profile)
     var CFG_KEY = 'carradio.settings'
     var defaults = { vol: 100, others: 100, bass: false, ultra: false, damage: true, muffleOwn: true, muffleOthers: true,
-      shakeMode: 'buzz', lights: false, speedVol: false, tune: '' }
+      shakeMode: 'buzz', lights: false, speedVol: false, tune: '', glowColor: '#8a2be2' }
     E.cfg = (function () {
       try {
         var saved = JSON.parse(localStorage.getItem(CFG_KEY) || '{}')
@@ -38,7 +38,7 @@
     // Your car's volume, bass and "Play in my car" choice are shared, so others hear your car as
     // you set it. Tuning only applies on a multiplayer server.
     function activeTune() { var s = E.lastState; return s && s.mp ? (E.cfg.tune || '') : '' }
-    function sendMeta() { bngApi.engineLua('carradio_main.setMeta(' + E.cfg.vol + ',' + (E.cfg.bass ? 'true' : 'false') + ',"' + activeTune() + '",' + (E.cfg.lights ? 'true' : 'false') + ')') }
+    function sendMeta() { bngApi.engineLua('carradio_main.setMeta(' + E.cfg.vol + ',' + (E.cfg.bass ? 'true' : 'false') + ',"' + activeTune() + '",' + (E.cfg.lights ? 'true' : 'false') + ',"' + (E.cfg.glowColor || '') + '")') }
     setInterval(sendMeta, 3000) // also covers a Lua reload
 
     E.media = function (cmd) { ensureAudio(); bngApi.engineLua('carradio_main.media("' + cmd + '")') }
@@ -294,7 +294,16 @@
       var i = Math.floor(h * 6), f = h * 6 - i, p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s)
       return [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][((i % 6) + 6) % 6]
     }
-    function updateGlowColor(c) {
+    // Idle colour: when the music is quiet (paused, between songs, radio off) the underglow
+    // fades to a steady colour instead of going dark. Each car shows its owner's idle colour.
+    var IDLE_LUMENS = 700, DEFAULT_IDLE = '#8a2be2'
+    function hexRgb(hex) {
+      var m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || '') || /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(DEFAULT_IDLE)
+      return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255]
+    }
+    function idleOf(r) { return hexRgb(r.k === 'own' ? E.cfg.glowColor : r.glow) }
+    function out(rgb, lumens) { return [+rgb[0].toFixed(3), +rgb[1].toFixed(3), +rgb[2].toFixed(3), Math.round(lumens)] }
+    function updateGlowColor(c, r) {
       var g = c.glow, now = performance.now()
       c.bassMeter.getFloatTimeDomainData(c.bassBuf)
       var sum = 0
@@ -307,11 +316,16 @@
       }
       g.avg += (g.env - g.avg) * 0.03
       g.flash *= 0.9
+      // Quiet music -> fade (~0.5 s) to the idle colour; music back -> beat colours again.
+      g.idle = g.idle == null ? 1 : g.idle + ((g.env < 0.01 ? 1 : 0) - g.idle) * 0.04
       var level = Math.min(1, g.env / 0.15)
-      var lumens = g.env < 0.003 ? 0 : 150 + 2600 * level * (0.45 + 0.55 * g.flash) // silent music = lights off
-      var rgb = hsv(g.hue, 1, 1)
-      return [+rgb[0].toFixed(3), +rgb[1].toFixed(3), +rgb[2].toFixed(3), Math.round(lumens)]
+      var musicLumens = 300 + 2450 * level * (0.45 + 0.55 * g.flash)
+      var musicRgb = hsv(g.hue, 1, 1), idleRgb = idleOf(r), k = g.idle
+      var rgb = [musicRgb[0] + (idleRgb[0] - musicRgb[0]) * k, musicRgb[1] + (idleRgb[1] - musicRgb[1]) * k, musicRgb[2] + (idleRgb[2] - musicRgb[2]) * k]
+      return out(rgb, musicLumens + (IDLE_LUMENS - musicLumens) * k)
     }
+    // A car with the light show on but no music playing at all: steady idle colour.
+    function idleGlow(r) { return out(idleOf(r), IDLE_LUMENS) }
     var glowSentAt = 0, glowWasOn = false
     function sendGlow(colors, now) {
       var any = Object.keys(colors).length > 0
@@ -335,7 +349,7 @@
           // A car gets a chain once its source is actually sending audio.
           if (!c && E.workletOk && now - (sourceLast[src] || -1e9) < 3000) c = createChain(r.k, src)
           if (c) applyCar(c, r, !!s.paused)
-          if (c && r.lights) glowColors[r.k] = updateGlowColor(c)
+          if (r.lights) glowColors[r.k] = c ? updateGlowColor(c, r) : idleGlow(r)
         }
         for (var k in chains) {
           var ch = chains[k]
@@ -481,6 +495,9 @@
   </div>
   <div class="cr-sec">Party</div>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.lights" ng-change="E.saveCfg()"> Underglow light show (colours pulse to the music)</label>
+  <div class="cr-row" ng-if="E.cfg.lights"><span class="cr-lbl">Idle colour</span>
+    <button class="cr-swatch" ng-repeat="col in ['#8a2be2', '#1e6bff', '#00d5ff', '#00ff6a', '#ff2a2a', '#ff3db8', '#ff9a00', '#ffffff']"
+      ng-style="{background: col}" ng-class="{on: E.cfg.glowColor === col}" ng-click="E.cfg.glowColor = col; E.saveCfg()" title="Glow colour when the music is quiet"></button></div>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.bass" ng-change="E.saveCfg()"> Bass boost (moves the car when loud)</label>
   <div class="cr-row"><span class="cr-lbl">Shake style</span>
     <label><input type="radio" value="buzz" ng-model="E.cfg.shakeMode" ng-change="E.saveCfg()"> Buzz</label>
@@ -506,6 +523,8 @@
 .cr-row { display:flex; align-items:center; gap:8px; margin:6px 0 }
 .cr-lbl { width:90px; flex:none }
 .cr-select { flex:1; background:#2a2a30; color:#eee; border:1px solid #555; border-radius:4px; padding:2px 4px }
+.cr-swatch { width:20px; height:20px; border-radius:10px; border:2px solid transparent; padding:0; cursor:pointer; flex:none }
+.cr-swatch.on { border-color:#fff; box-shadow:0 0 0 1px #000 }
 .cr-hint { font-size:11px; opacity:0.55; margin-top:-2px }
 .cr-dim { opacity:0.7 }
 .cr-warn { color:#ffb36b }

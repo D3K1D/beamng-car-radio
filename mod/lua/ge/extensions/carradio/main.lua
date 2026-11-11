@@ -14,7 +14,7 @@ local socket = require('socket')
 local mime = require('mime')
 
 local logTag = 'carradio'
-local VERSION = '0.2.1'
+local VERSION = '0.2.2'
 local PROTO = 1
 local LINK_PORT = 38742
 
@@ -215,7 +215,7 @@ end
 local radio = { on = false, vehId = nil }
 -- This player's radio settings (from the app), shared so everyone hears a car the way its
 -- owner set it: volume, bass, and "tune" (the key of the car whose music it plays: Convoy DJ).
-local ownMeta = { vol = 100, bass = false, tune = '', lights = false }
+local ownMeta = { vol = 100, bass = false, tune = '', lights = false, glow = '' } -- glow: idle underglow colour '#rrggbb'
 
 local function currentDrivableVehicle()
   local veh = getPlayerVehicle(0)
@@ -286,11 +286,14 @@ end
 
 local function sanitizeKey(k) return type(k) == 'string' and k:match('^%d+%-%d+$') or '' end
 
-local function setMeta(vol, bass, tune, lights)
+local function sanitizeColor(c) return type(c) == 'string' and c:match('^#%x%x%x%x%x%x$') or '' end
+
+local function setMeta(vol, bass, tune, lights, glow)
   ownMeta.vol = math.max(0, math.min(1000, tonumber(vol) or 100))
   ownMeta.bass = bass and true or false
   ownMeta.tune = sanitizeKey(tune)
   ownMeta.lights = lights and true or false
+  ownMeta.glow = sanitizeColor(glow)
 end
 
 local function ownKey()
@@ -324,7 +327,7 @@ local function mpUpdate(now)
       -- A player may only describe their own cars: keys are "<playerID>-<vehicleID>".
       if m.key:sub(1, #tostring(m.pid) + 1) ~= tostring(m.pid) .. '-' then return end
       mp.remoteMeta[m.key] = { vol = math.max(0, math.min(1000, tonumber(m.vol) or 100)), bass = m.bass and true or false,
-        tune = sanitizeKey(m.tune), lights = m.lights and true or false, at = os.clock() }
+        tune = sanitizeKey(m.tune), lights = m.lights and true or false, glow = sanitizeColor(m.glow), at = os.clock() }
     end, 'carradio')
     mp.handlersAdded = true
   end
@@ -338,9 +341,15 @@ local function mpUpdate(now)
   local key = ownKey()
   -- Only broadcast our own audio while not tuned to someone else's.
   sendSession({ relay = mp.config.relay, secret = mp.config.secret, key = ownMeta.tune == '' and key or '' })
-  -- Share this car's volume/bass/tune: on change (at most twice a second) and every 5 s for late joiners.
-  if key ~= '' and TriggerServerEvent then
-    local json = jsonEncode({ key = key, vol = ownMeta.vol, bass = ownMeta.bass, tune = ownMeta.tune, lights = ownMeta.lights })
+  -- Share this car's volume/bass/tune/underglow: on change (at most twice a second) and every
+  -- 5 s for late joiners. With the radio off but underglow on, describe the car being driven.
+  local metaKey = key
+  if metaKey == '' and ownMeta.lights and getServerVehicleID then
+    local v = currentDrivableVehicle()
+    metaKey = v and getServerVehicleID(v:getId()) or ''
+  end
+  if metaKey ~= '' and TriggerServerEvent then
+    local json = jsonEncode({ key = metaKey, vol = ownMeta.vol, bass = ownMeta.bass, tune = ownMeta.tune, lights = ownMeta.lights, glow = ownMeta.glow })
     if (json ~= metaSent.json and now - metaSent.at > 0.5) or now - metaSent.at > 5 then
       TriggerServerEvent('carradio_meta', json)
       metaSent.json, metaSent.at = json, now
@@ -349,13 +358,18 @@ local function mpUpdate(now)
 end
 
 -- ---------------------------------------------------------------- underglow (light show)
--- Four invisible point lights under each car with the light show on, near the corners and
--- just above the ground (from the car's own bounding box and axes, so any vehicle works).
--- The app decides colour and brightness from that car's music; every player's game draws
--- the underglow for every car, so it stays in time with what each of them hears.
+-- Four invisible spot lights under each car with the light show on, pointing straight down
+-- from ~0.4 m above the ground and kept well inside the bumpers (from the car's own bounding
+-- box and axes, so any vehicle works). Pointing down, they light the road under and around
+-- the car but nothing above them: headlights, lenses and the upper body are never lit.
+-- The app decides colour and brightness from that car's music (an idle colour when quiet);
+-- every player's game draws the underglow for every car, in time with what each hears.
 local glowTargets, glowAt = {}, -100 -- from the app: { [carKey] = { r, g, b, lumens } }
 local glowLights = {}                -- [vehId] = { light objects }
-local GLOW_CORNERS = { { 0.45, 0.6 }, { 0.45, -0.6 }, { -0.45, 0.6 }, { -0.45, -0.6 } } -- (along, across) fractions
+local GLOW_CORNERS = { { 0.3, 0.45 }, { 0.3, -0.45 }, { -0.3, 0.45 }, { -0.3, -0.45 } } -- (along, across) fractions
+local GLOW_HEIGHT = 0.4        -- metres above the car's lowest point
+local GLOW_CONE_OUTER = 140    -- degrees: a wide pool of light on the ground, never upwards
+local GLOW_CONE_INNER = 70
 
 local function setGlow(json)
   local ok, t = pcall(jsonDecode, json)
@@ -373,8 +387,11 @@ local function makeGlow(vehId)
     local name = 'carradio_glow_' .. vehId .. '_' .. i
     local old = scenetree.findObject(name)
     if old then old:delete() end
-    local l = createObject('PointLight')
+    local l = createObject('SpotLight')
     l.canSave = false
+    l:setField('innerAngle', 0, tostring(GLOW_CONE_INNER))
+    l:setField('outerAngle', 0, tostring(GLOW_CONE_OUTER))
+    l:setField('castShadows', 0, 'false')
     l:registerObject(name)
     lights[i] = l
   end
@@ -393,14 +410,18 @@ local function placeGlow(veh, lights, color)
     local axis, half = vec3(box:getAxis(i)), (i == 0 and h.x) or (i == 1 and h.y) or h.z
     hl, hw, hh = hl + math.abs(axis:dot(dir)) * half, hw + math.abs(axis:dot(right)) * half, hh + math.abs(axis:dot(up)) * half
   end
-  local base = c - up * (hh - 0.12) -- just above the lowest point (tyres) of the car
-  local radius = math.max(2.5, math.min(7, hw * 2.2))
+  local base = c - up * (hh - GLOW_HEIGHT) -- GLOW_HEIGHT above the lowest point (tyres) of the car
+  local range = GLOW_HEIGHT + 2.5
   local colorStr = string.format('%.3f %.3f %.3f 1', color[1], color[2], color[3])
+  -- Straight down along the car's own up axis (follows the car when it tilts or hops).
+  local rot = quatFromDir(-up, dir):toTorqueQuat()
+  local rotStr = rot.x .. ' ' .. rot.y .. ' ' .. rot.z .. ' ' .. rot.w
   for i, corner in ipairs(GLOW_CORNERS) do
     local l = lights[i]
     l:setPosition(base + dir * (corner[1] * hl) + right * (corner[2] * hw))
+    l:setField('rotation', 0, rotStr)
     l:setField('color', 0, colorStr)
-    l.radius = radius
+    l:setField('range', 0, tostring(range))
     l.intensity = math.max(0, color[4] or 0)
     l.isEnabled = (color[4] or 0) > 1
     l:postApply()
@@ -412,7 +433,9 @@ local function updateGlow(now)
   local wanted = {}
   for key, color in pairs(glowTargets) do
     local vehId
-    if key == 'own' then vehId = radio.vehId
+    if key == 'own' then -- the radio car, or the car you are driving (idle glow while the radio is off)
+      vehId = radio.vehId
+      if not vehId then local v = currentDrivableVehicle(); vehId = v and v:getId() end
     elseif getGameVehicleID then local gid = getGameVehicleID(key); vehId = gid and gid ~= -1 and gid or nil end
     local veh = vehId and be:getObjectByID(vehId)
     if veh and type(color) == 'table' then
@@ -468,6 +491,15 @@ local function onUpdate(dtReal)
       r.k = 'own'
       r.tune = ownMeta.tune
       r.lights = ownMeta.lights
+      r.glow = ownMeta.glow
+      state.radios[#state.radios + 1] = r
+    end
+  elseif ownMeta.lights then
+    -- Radio off but underglow on: the car you are driving keeps its idle glow.
+    local veh = currentDrivableVehicle()
+    if veh then
+      local r = radioState(veh, cam)
+      r.k, r.lights, r.glow, r.glowOnly = 'own', true, ownMeta.glow, true
       state.radios[#state.radios + 1] = r
     end
   end
@@ -478,7 +510,7 @@ local function onUpdate(dtReal)
     if now - last > 3 then mp.remotes[key] = nil else active[key] = true end
   end
   for key, meta in pairs(mp.remoteMeta) do
-    if now - meta.at > 12 then mp.remoteMeta[key] = nil elseif meta.tune ~= '' then active[key] = true end
+    if now - meta.at > 12 then mp.remoteMeta[key] = nil elseif meta.tune ~= '' or meta.lights then active[key] = true end -- tuned (Convoy DJ) or underglow on
   end
   if getGameVehicleID then
     for key in pairs(active) do
@@ -490,7 +522,7 @@ local function onUpdate(dtReal)
         r.owner = ownerName(key)
         r.broadcasting = mp.remotes[key] ~= nil
         local meta = mp.remoteMeta[key]
-        if meta then r.vol, r.bass, r.tune, r.lights = meta.vol, meta.bass, meta.tune, meta.lights end
+        if meta then r.vol, r.bass, r.tune, r.lights, r.glow = meta.vol, meta.bass, meta.tune, meta.lights, meta.glow end
         state.radios[#state.radios + 1] = r
       end
     end
