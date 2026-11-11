@@ -6,7 +6,7 @@
 // jitter buffer (AudioWorklet) and that car's effects chain; car positions/condition
 // arrive as 'CarRadioState' (camera-relative, ~60 Hz).
 (function () {
-  var VERSION = '0.2.5'
+  var VERSION = '0.2.6'
 
   // =====================================================================================
   // Engine

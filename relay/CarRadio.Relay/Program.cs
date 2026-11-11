@@ -55,7 +55,7 @@ return 0;
 
 sealed class Relay(string secret)
 {
-    public const string Version = "0.2.5";
+    public const string Version = "0.2.6";
     const int Proto = 1;
     const byte Join = 0x20, Audio = 0x21, Welcome = 0x22, Error = 0x23, Key = 0x24;
     const int MaxFrame = 65536;

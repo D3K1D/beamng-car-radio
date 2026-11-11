@@ -14,7 +14,7 @@ local socket = require('socket')
 local mime = require('mime')
 
 local logTag = 'carradio'
-local VERSION = '0.2.5'
+local VERSION = '0.2.6'
 local PROTO = 1
 local LINK_PORT = 38742
 
@@ -381,6 +381,14 @@ local function removeGlow(vehId)
   glowLights[vehId] = nil
 end
 
+-- Set a light field the way the game's own coloured SpotLight (photo-mode flash) does: as a
+-- property and through setField. A SpotLight ignores a property-only write of intensity or
+-- isEnabled, and with useColorTemperature on it ignores 'color' (stuck on one colour).
+local function lightField(l, name, value)
+  pcall(function() l[name] = value end)
+  l:setField(name, 0, type(value) == 'boolean' and (value and 'true' or 'false') or tostring(value))
+end
+
 local function makeGlow(vehId)
   local lights = {}
   for i = 1, #GLOW_CORNERS do
@@ -392,6 +400,7 @@ local function makeGlow(vehId)
     l:setField('innerAngle', 0, tostring(GLOW_CONE_INNER))
     l:setField('outerAngle', 0, tostring(GLOW_CONE_OUTER))
     l:setField('castShadows', 0, 'false')
+    l:setField('useColorTemperature', 0, 'false')
     l:registerObject(name)
     lights[i] = l
   end
@@ -420,10 +429,11 @@ local function placeGlow(veh, lights, color)
     local l = lights[i]
     l:setPosition(base + dir * (corner[1] * hl) + right * (corner[2] * hw))
     l:setField('rotation', 0, rotStr)
+    l:setField('useColorTemperature', 0, 'false')
     l:setField('color', 0, colorStr)
-    l:setField('range', 0, tostring(range))
-    l.intensity = math.max(0, color[4] or 0)
-    l.isEnabled = (color[4] or 0) > 1
+    lightField(l, 'range', range)
+    lightField(l, 'intensity', math.max(0, color[4] or 0))
+    lightField(l, 'isEnabled', (color[4] or 0) > 1)
     l:postApply()
   end
 end
