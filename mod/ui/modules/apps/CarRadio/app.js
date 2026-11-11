@@ -6,7 +6,7 @@
 // jitter buffer (AudioWorklet) and that car's effects chain; car positions/condition
 // arrive as 'CarRadioState' (camera-relative, ~60 Hz).
 (function () {
-  var VERSION = '0.2.0'
+  var VERSION = '0.2.1'
 
   // =====================================================================================
   // Engine
@@ -38,7 +38,7 @@
     // Your car's volume, bass and "Play in my car" choice are shared, so others hear your car as
     // you set it. Tuning only applies on a multiplayer server.
     function activeTune() { var s = E.lastState; return s && s.mp ? (E.cfg.tune || '') : '' }
-    function sendMeta() { bngApi.engineLua('carradio_main.setMeta(' + E.cfg.vol + ',' + (E.cfg.bass ? 'true' : 'false') + ',"' + activeTune() + '")') }
+    function sendMeta() { bngApi.engineLua('carradio_main.setMeta(' + E.cfg.vol + ',' + (E.cfg.bass ? 'true' : 'false') + ',"' + activeTune() + '",' + (E.cfg.lights ? 'true' : 'false') + ')') }
     setInterval(sendMeta, 3000) // also covers a Lua reload
 
     E.media = function (cmd) { ensureAudio(); bngApi.engineLua('carradio_main.media("' + cmd + '")') }
@@ -130,10 +130,10 @@
       c.muffle.connect(c.directGain); c.directGain.connect(c.out)
       c.muffle.connect(c.reverbSend); c.reverbSend.connect(c.convolver); c.convolver.connect(c.out)
       c.out.connect(own ? ownBus : othersBus)
-      if (own) {
-        c.bassMeter = ctx.createAnalyser(); c.bassMeter.fftSize = 1024; c.bassBuf = new Float32Array(1024)
-        c.bassTrim.connect(biquad('lowpass', 120)).connect(c.bassMeter)
-      }
+      // Bass meter for every car: drives your car's shake/hop and each car's underglow.
+      c.bassMeter = ctx.createAnalyser(); c.bassMeter.fftSize = 1024; c.bassBuf = new Float32Array(1024)
+      c.bassTrim.connect(biquad('lowpass', 120)).connect(c.bassMeter)
+      c.glow = { env: 0, avg: 0, hue: Math.random(), flash: 0, lastBeat: 0 }
       c.decoder = new AudioDecoder({
         output: function (ad) {
           var n = ad.numberOfFrames, l = new Float32Array(n), r = new Float32Array(n)
@@ -275,10 +275,10 @@
       if (!force && x < 0.01 && bass.lastSent < 0.01) return
       bass.lastSent = x; bass.lastAt = t
       var cfg = E.cfg, mode = cfg.bass ? (cfg.shakeMode === 'hop' ? 2 : 1) : 0
-      bngApi.engineLua('carradio_main.setBass(' + x.toFixed(3) + ',' + (cfg.ultra ? 5 : 1) + ',' + mode + ',' + (cfg.lights ? 'true' : 'false') + ')')
+      bngApi.engineLua('carradio_main.setBass(' + x.toFixed(3) + ',' + (cfg.ultra ? 5 : 1) + ',' + mode + ',false)') // light show is underglow now, not high beams
     }
     function updateBassShake(c, paused) {
-      if (!(E.cfg.bass || E.cfg.lights) || paused) { bass.env = 0; sendBass(0); return }
+      if (!E.cfg.bass || paused) { bass.env = 0; sendBass(0); return }
       c.bassMeter.getFloatTimeDomainData(c.bassBuf)
       var sum = 0
       for (var i = 0; i < c.bassBuf.length; i++) sum += c.bassBuf[i] * c.bassBuf[i]
@@ -287,13 +287,47 @@
       sendBass(bass.env)
     }
 
+    // ---------------- underglow light show (every car that has it on)
+    // Beat = bass clearly above its recent average: jump to a new hue and flash brighter.
+    // Brightness follows the bass between beats. Sent to game Lua, which places the lights.
+    function hsv(h, s, v) {
+      var i = Math.floor(h * 6), f = h * 6 - i, p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s)
+      return [[v, t, p], [q, v, p], [p, v, t], [p, q, v], [t, p, v], [v, p, q]][((i % 6) + 6) % 6]
+    }
+    function updateGlowColor(c) {
+      var g = c.glow, now = performance.now()
+      c.bassMeter.getFloatTimeDomainData(c.bassBuf)
+      var sum = 0
+      for (var i = 0; i < c.bassBuf.length; i++) sum += c.bassBuf[i] * c.bassBuf[i]
+      var rms = Math.sqrt(sum / c.bassBuf.length)
+      g.env = rms > g.env ? rms : g.env * 0.88
+      if (g.env > 0.015 && g.env > g.avg * 1.35 && now - g.lastBeat > 200) {
+        g.lastBeat = now; g.flash = 1
+        g.hue = (g.hue + 0.15 + Math.random() * 0.2) % 1
+      }
+      g.avg += (g.env - g.avg) * 0.03
+      g.flash *= 0.9
+      var level = Math.min(1, g.env / 0.15)
+      var lumens = g.env < 0.003 ? 0 : 150 + 2600 * level * (0.45 + 0.55 * g.flash) // silent music = lights off
+      var rgb = hsv(g.hue, 1, 1)
+      return [+rgb[0].toFixed(3), +rgb[1].toFixed(3), +rgb[2].toFixed(3), Math.round(lumens)]
+    }
+    var glowSentAt = 0, glowWasOn = false
+    function sendGlow(colors, now) {
+      var any = Object.keys(colors).length > 0
+      if (!any && !glowWasOn) return
+      if (now - glowSentAt < 33) return
+      glowSentAt = now; glowWasOn = any
+      bngApi.engineLua('carradio_main.setGlow(' + JSON.stringify(JSON.stringify(colors)) + ')')
+    }
+
     // ---------------- state from game Lua
     var tick = 0
     $rootScope.$on('CarRadioState', function (e, s) {
       E.lastState = s
       if (ctx) {
         if (ctx.state === 'suspended' && tick % 60 === 0) ctx.resume()
-        var seen = {}, now = performance.now()
+        var seen = {}, now = performance.now(), glowColors = {}
         for (var i = 0; i < s.radios.length; i++) {
           var r = s.radios[i], src = sourceFor(r, s), c = chains[r.k]
           seen[r.k] = true
@@ -301,12 +335,14 @@
           // A car gets a chain once its source is actually sending audio.
           if (!c && E.workletOk && now - (sourceLast[src] || -1e9) < 3000) c = createChain(r.k, src)
           if (c) applyCar(c, r, !!s.paused)
+          if (c && r.lights) glowColors[r.k] = updateGlowColor(c)
         }
         for (var k in chains) {
           var ch = chains[k]
           if (!seen[k]) ch.out.gain.setTargetAtTime(0, ctx.currentTime, 0.1) // car unknown here: silent
           if (now - ch.lastAudio > 5000 || (!seen[k] && now - ch.lastAudio > 2000)) destroyChain(k)
         }
+        sendGlow(glowColors, now)
       }
       if (++tick % 15 === 0) updateView(s)
     })
@@ -444,7 +480,7 @@
     <div class="cr-hint" ng-if="!E.view.tuneText">Tune in to another player's radio; everyone hears it from your car too.</div>
   </div>
   <div class="cr-sec">Party</div>
-  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.lights" ng-change="E.saveCfg()"> Light show (headlights flash to the beat)</label>
+  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.lights" ng-change="E.saveCfg()"> Underglow light show (colours pulse to the music)</label>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.bass" ng-change="E.saveCfg()"> Bass boost (moves the car when loud)</label>
   <div class="cr-row"><span class="cr-lbl">Shake style</span>
     <label><input type="radio" value="buzz" ng-model="E.cfg.shakeMode" ng-change="E.saveCfg()"> Buzz</label>

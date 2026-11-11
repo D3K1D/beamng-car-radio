@@ -53,6 +53,7 @@ function carRadioOnMeta(playerId, data)
     bass = m.bass and true or false,
     -- Convoy DJ: the car whose music this car plays ("" = its own)
     tune = type(m.tune) == "string" and m.tune:match("^%d+%-%d+$") or "",
+    lights = m.lights and true or false, -- underglow light show on this car
   }))
 end
 
