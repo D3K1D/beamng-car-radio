@@ -6,7 +6,7 @@
 // jitter buffer (AudioWorklet) and that car's effects chain; car positions/condition
 // arrive as 'CarRadioState' (camera-relative, ~60 Hz).
 (function () {
-  var VERSION = '0.2.3'
+  var VERSION = '0.2.4'
 
   // =====================================================================================
   // Engine
@@ -17,7 +17,7 @@
     // ---------------- settings (remembered in this browser profile)
     var CFG_KEY = 'carradio.settings'
     var defaults = { vol: 100, others: 100, bass: false, ultra: false, damage: true, muffleOwn: true, muffleOthers: true,
-      shakeMode: 'buzz', lights: false, speedVol: false, tune: '', glowColor: '#8a2be2' }
+      shakeMode: 'buzz', lights: false, speedVol: false, tune: '', glowColor: '#8a2be2', ultraPower: 25 }
     E.cfg = (function () {
       try {
         var saved = JSON.parse(localStorage.getItem(CFG_KEY) || '{}')
@@ -30,6 +30,7 @@
       c.vol = Math.max(0, Math.min(1000, Number(c.vol) || 0))
       c.others = Math.max(0, Math.min(200, Number(c.others) || 0))
       if (!/^\d+-\d+$/.test(c.tune || '')) c.tune = ''
+      c.ultraPower = Math.max(0, Math.min(100, Number(c.ultraPower) || 0))
       try { localStorage.setItem(CFG_KEY, JSON.stringify(c)) } catch (e) {}
       applyVolumes()
       sendMeta()
@@ -38,7 +39,12 @@
     // Your car's volume, bass and "Play in my car" choice are shared, so others hear your car as
     // you set it. Tuning only applies on a multiplayer server.
     function activeTune() { var s = E.lastState; return s && s.mp ? (E.cfg.tune || '') : '' }
-    function sendMeta() { bngApi.engineLua('carradio_main.setMeta(' + E.cfg.vol + ',' + (E.cfg.bass ? 'true' : 'false') + ',"' + activeTune() + '",' + (E.cfg.lights ? 'true' : 'false') + ',"' + (E.cfg.glowColor || '') + '")') }
+    // B = heavier bass only; ULTRA = heavier bass + the car moves. Both boost the bass others hear.
+    function bassEq() { return !!(E.cfg.bass || E.cfg.ultra) }
+    // ULTRA power slider 0-100 % -> force multiplier: 25 % = 1x (old normal shake), 50 % = 5x
+    // (old ULTRA), 100 % = ~125x (launches the car on a big bass hit), 0 % = 0.2x.
+    E.ultraMult = function () { return Math.pow(10, ((Number(E.cfg.ultraPower) || 0) - 25) / 25 * 0.7) }
+    function sendMeta() { bngApi.engineLua('carradio_main.setMeta(' + E.cfg.vol + ',' + (bassEq() ? 'true' : 'false') + ',"' + activeTune() + '",' + (E.cfg.lights ? 'true' : 'false') + ',"' + (E.cfg.glowColor || '') + '")') }
     setInterval(sendMeta, 3000) // also covers a Lua reload
 
     E.media = function (cmd) { ensureAudio(); bngApi.engineLua('carradio_main.media("' + cmd + '")') }
@@ -223,13 +229,12 @@
       c.out.gain.setTargetAtTime(1, now, 0.05)
       // Other cars: their owner's volume and bass setting. Louder with speed (your setting, every
       // car you hear): +0 dB up to 40 km/h rising to +4 dB at 130 km/h, over road and wind noise.
-      var bassOn = c.own ? cfg.bass : !!r.bass
+      var bassOn = c.own ? bassEq() : !!r.bass
       var speedDb = cfg.speedVol && !paused ? Math.max(0, Math.min(1, ((r.speed || 0) * 3.6 - 40) / 90)) * 4 : 0
       var ownerVol = c.own ? 1 : (r.vol != null ? r.vol : 100) / 100
       c.ownerVol.gain.setTargetAtTime(ownerVol * Math.pow(10, speedDb / 20), now, 0.3)
       // Damage
-      var dmgOn = cfg.damage && !paused, dpk = r.damagePerKg
-      if (!cfg.damage) cond.wrecked = false
+      var dmgOn = !paused, dpk = r.damagePerKg // damage effects are always on
       if (dpk != null && !dmgOn) {
         cond.prevDpk = dpk
         c.dmgHP.frequency.setTargetAtTime(20, now, 0.1); c.dmgLP.frequency.setTargetAtTime(20000, now, 0.1)
@@ -274,11 +279,12 @@
       if (!force && t - bass.lastAt < 33) return
       if (!force && x < 0.01 && bass.lastSent < 0.01) return
       bass.lastSent = x; bass.lastAt = t
-      var cfg = E.cfg, mode = cfg.bass ? (cfg.shakeMode === 'hop' ? 2 : 1) : 0
-      bngApi.engineLua('carradio_main.setBass(' + x.toFixed(3) + ',' + (cfg.ultra ? 5 : 1) + ',' + mode + ',false)') // light show is underglow now, not high beams
+      // Only ULTRA moves the car (buzz or lowrider hop), at the power slider's strength.
+      var cfg = E.cfg, mode = cfg.ultra ? (cfg.shakeMode === 'hop' ? 2 : 1) : 0
+      bngApi.engineLua('carradio_main.setBass(' + x.toFixed(3) + ',' + E.ultraMult().toFixed(2) + ',' + mode + ',false)')
     }
     function updateBassShake(c, paused) {
-      if (!E.cfg.bass || paused) { bass.env = 0; sendBass(0); return }
+      if (!E.cfg.ultra || paused) { bass.env = 0; sendBass(0); return }
       c.bassMeter.getFloatTimeDomainData(c.bassBuf)
       var sum = 0
       for (var i = 0; i < c.bassBuf.length; i++) sum += c.bassBuf[i] * c.bassBuf[i]
@@ -484,7 +490,6 @@
   <div class="cr-sec">Sound</div>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.muffleOwn" ng-change="E.saveCfg()"> Muffle my car when viewed from outside</label>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.muffleOthers" ng-change="E.saveCfg()"> Muffle other cars from outside</label>
-  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.damage" ng-change="E.saveCfg()"> Damage effects</label>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.speedVol" ng-change="E.saveCfg()"> Louder with speed</label>
   <div ng-if="E.view.mp">
     <div class="cr-sec">Convoy DJ</div>
@@ -502,11 +507,17 @@
   <div class="cr-row" ng-if="E.cfg.lights"><span class="cr-lbl">Idle colour</span>
     <button class="cr-swatch" ng-repeat="col in ['#8a2be2', '#1e6bff', '#00d5ff', '#00ff6a', '#ff2a2a', '#ff3db8', '#ff9a00', '#ffffff']"
       ng-style="{background: col}" ng-class="{on: E.cfg.glowColor === col}" ng-click="E.cfg.glowColor = col; E.saveCfg()" title="Glow colour when the music is quiet"></button></div>
-  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.bass" ng-change="E.saveCfg()"> Bass boost (moves the car when loud)</label>
-  <div class="cr-row"><span class="cr-lbl">Shake style</span>
-    <label><input type="radio" value="buzz" ng-model="E.cfg.shakeMode" ng-change="E.saveCfg()"> Buzz</label>
-    <label><input type="radio" value="hop" ng-model="E.cfg.shakeMode" ng-change="E.saveCfg()"> Lowrider hop</label></div>
-  <div class="cr-row"><button class="cr-ultra" ng-class="{on: E.cfg.ultra}" ng-click="E.cfg.ultra = !E.cfg.ultra; E.saveCfg()" title="Multiplies the bass shake / hop">ULTRA BASS BOOST{{E.cfg.ultra ? ' ON' : ''}}</button></div>
+  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.bass" ng-change="E.saveCfg()"> Bass boost (heavier bass, the car stays still)</label>
+  <div class="cr-row"><button class="cr-ultra" ng-class="{on: E.cfg.ultra}" ng-click="E.cfg.ultra = !E.cfg.ultra; E.saveCfg()" title="Heavier bass that physically moves the car">ULTRA BASS BOOST{{E.cfg.ultra ? ' ON' : ''}}</button></div>
+  <div ng-if="E.cfg.ultra">
+    <div class="cr-row"><span class="cr-lbl">Power</span>
+      <input class="cr-vol" type="range" min="0" max="100" step="1" ng-model="E.cfg.ultraPower" ng-change="E.saveCfg()" ng-dblclick="E.cfg.ultraPower = 25; E.saveCfg()" title="Double-click for the default (25 %)">
+      <span class="cr-pct">{{E.cfg.ultraPower}}%</span></div>
+    <div class="cr-hint" ng-class="{'cr-warn': E.cfg.ultraPower >= 75}">{{E.cfg.ultraPower < 15 ? 'Gentle rumble' : E.cfg.ultraPower < 40 ? 'Shakes the car' : E.cfg.ultraPower < 60 ? 'Heavy shaking' : E.cfg.ultraPower < 75 ? 'Destructive' : E.cfg.ultraPower < 90 ? 'Very destructive' : 'Launches the car into space'}}</div>
+    <div class="cr-row"><span class="cr-lbl">Style</span>
+      <label><input type="radio" value="buzz" ng-model="E.cfg.shakeMode" ng-change="E.saveCfg()"> Buzz</label>
+      <label><input type="radio" value="hop" ng-model="E.cfg.shakeMode" ng-change="E.saveCfg()"> Lowrider hop</label></div>
+  </div>
 </div>`
 
     var STYLE = `
@@ -547,7 +558,7 @@
     <button class="cr-btn" ng-click="E.media('next')" title="Next">&#9197;</button>
     <input class="cr-vol" type="range" min="0" max="1000" step="5" ng-model="E.cfg.vol" ng-change="E.saveCfg()" ng-dblclick="E.cfg.vol = 100; E.saveCfg()" title="Your car's volume (double-click for 100%)">
     <span class="cr-pct">{{E.cfg.vol}}%</span>
-    <button class="cr-btn cr-bass" ng-class="{on: E.cfg.bass}" ng-click="E.cfg.bass = !E.cfg.bass; E.saveCfg()" title="Bass boost">B</button>
+    <button class="cr-btn cr-bass" ng-class="{on: E.cfg.bass}" ng-click="E.cfg.bass = !E.cfg.bass; E.saveCfg()" title="Bass boost: heavier bass (ULTRA in settings also moves the car)">B</button>
     <button class="cr-btn" ng-class="{on: ui.panel}" ng-click="togglePanel()" title="Settings">&#9881;</button>
   </div>
 </div>`,

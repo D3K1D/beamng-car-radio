@@ -1,6 +1,6 @@
 -- CarRadio: bass shake (vehicle Lua, loads as "carradio_bassShake").
--- Shakes the vehicle with the radio's bass when the BASS button is on. Level comes
--- from the HUD app (via game-engine Lua) about 30 times a second.
+-- Moves the vehicle with the radio's bass when ULTRA BASS BOOST is on (plain bass boost never moves it).
+-- The bass level comes from the HUD app (via game-engine Lua) about 30 times a second.
 -- Works on any vehicle: nodes are picked from the vehicle's own node list and every
 -- force is scaled by that node's mass, so a bus and a hatchback react alike.
 -- While shaking, a gentle upright assist pulls roll/pitch back towards level and damps
@@ -31,7 +31,7 @@ local BEAT_MIN_GAP = 0.2     -- seconds between beats at most 5/s
 local BEAT_RATIO = 1.35      -- a beat is a bass hit this far above the recent average
 
 local level, smoothed, kick = 0, 0, 0
-local multiplier = 1 -- ULTRA BASS BOOST = 5
+local multiplier = 1 -- ULTRA BASS BOOST power: 0.2 (gentle) .. 1 (normal) .. 5 .. ~125 (launch)
 local mode = 1       -- 0 = no shake, 1 = buzz, 2 = lowrider hop
 local beatAvg, lastBeatT = 0, -100
 local hopUntil, hopFront = -1, true
@@ -68,7 +68,7 @@ end
 -- (The 4th argument, once a high-beam light show, is ignored: CarRadio never touches a
 -- car's own lights. The light show is underglow drawn by game-engine Lua.)
 local function setLevel(x, mult, newMode)
-  multiplier = math.max(0, math.min(5, tonumber(mult) or 1))
+  multiplier = math.max(0, math.min(150, tonumber(mult) or 1))
   mode = tonumber(newMode) or 1
   x = tonumber(x) or 0
   if x > level then kick = math.max(kick, x - level) end -- a rising edge is a bass hit
@@ -140,7 +140,7 @@ local function onPhysicsStep(dt)
   elseif mode == 2 and t < hopUntil and drive > 0 then
     -- Lowrider hop: push the front or the rear half up for a moment, alternating each beat.
     lastShakeT = t
-    local a = HOP_G * 9.81 * math.min(1.5, drive) * (multiplier > 1 and 2 or 1)
+    local a = HOP_G * 9.81 * math.min(1.5, drive) * multiplier
     for i = 1, #nodes do
       local n = nodes[i]
       if n.front == hopFront then obj:applyForceVectorTime(n.cid, up * (n.mass * a), applyTime) end
@@ -149,7 +149,7 @@ local function onPhysicsStep(dt)
   -- Assist while shaking and shortly after (stronger with ULTRA, whose hits are harder;
   -- softer for the hop, which is meant to pitch the car).
   local since = t - lastShakeT
-  local strength = since < ASSIST_HOLD and math.min(1, 1 - since / ASSIST_HOLD + 0.2) * (multiplier > 1 and 1.6 or 1) * (mode == 2 and 0.4 or 1) or 0
+  local strength = since < ASSIST_HOLD and math.min(1, 1 - since / ASSIST_HOLD + 0.2) * (multiplier > 2 and 1.6 or 1) * (mode == 2 and 0.4 or 1) or 0
   if strength > 0 then uprightAssist(up, fwd, applyTime, strength) else prevUp = nil end
 end
 
