@@ -228,9 +228,10 @@
       c.muffle.frequency.setTargetAtTime(muffleSetting && !inside && !paused ? 900 : 20000, now, 0.08)
       c.out.gain.setTargetAtTime(1, now, 0.05)
       // Other cars: their owner's volume and bass setting. Louder with speed (your setting, every
-      // car you hear): +0 dB up to 40 km/h rising to +4 dB at 130 km/h, over road and wind noise.
+      // car you hear): +0 dB up to 20 km/h rising to +12 dB at 160 km/h (~4x as loud), over road
+      // and wind noise. The limiter keeps the loud end from clipping.
       var bassOn = c.own ? bassEq() : !!r.bass
-      var speedDb = cfg.speedVol && !paused ? Math.max(0, Math.min(1, ((r.speed || 0) * 3.6 - 40) / 90)) * 4 : 0
+      var speedDb = cfg.speedVol && !paused ? Math.max(0, Math.min(1, ((r.speed || 0) * 3.6 - 20) / 140)) * 12 : 0
       var ownerVol = c.own ? 1 : (r.vol != null ? r.vol : 100) / 100
       c.ownerVol.gain.setTargetAtTime(ownerVol * Math.pow(10, speedDb / 20), now, 0.3)
       // Damage
@@ -497,7 +498,7 @@
   <div class="cr-sec">Sound</div>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.muffleOwn" ng-change="E.saveCfg()"> Muffle my car when viewed from outside</label>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.muffleOthers" ng-change="E.saveCfg()"> Muffle other cars from outside</label>
-  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.speedVol" ng-change="E.saveCfg()"> Louder with speed</label>
+  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.speedVol" ng-change="E.saveCfg()"> Louder with speed (up to 4x as loud at 160 km/h)</label>
   <div ng-if="E.view.mp">
     <div class="cr-sec">Convoy DJ</div>
     <div class="cr-hint">Play in my car (everyone hears it from your car):</div>
