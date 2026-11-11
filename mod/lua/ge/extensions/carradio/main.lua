@@ -14,7 +14,7 @@ local socket = require('socket')
 local mime = require('mime')
 
 local logTag = 'carradio'
-local VERSION = '0.2.6'
+local VERSION = '0.2.7'
 local PROTO = 1
 local LINK_PORT = 38742
 
@@ -358,18 +358,15 @@ local function mpUpdate(now)
 end
 
 -- ---------------------------------------------------------------- underglow (light show)
--- Four invisible spot lights under each car with the light show on, pointing straight down
--- from ~0.4 m above the ground and kept well inside the bumpers (from the car's own bounding
--- box and axes, so any vehicle works). Pointing down, they light the road under and around
--- the car but nothing above them: headlights, lenses and the upper body are never lit.
--- The app decides colour and brightness from that car's music (an idle colour when quiet);
+-- Four invisible point lights under each car with the light show on, just above the ground
+-- (from the car's own bounding box and axes, so any vehicle works) - the 0.2.1 underglow.
+-- They sit well inside the bumpers with a light pool that ends before the car's ends, so the
+-- headlights and tail lights are never lit.
+-- The app decides colour and brightness from that car's music (an idle colour when silent);
 -- every player's game draws the underglow for every car, in time with what each hears.
 local glowTargets, glowAt = {}, -100 -- from the app: { [carKey] = { r, g, b, lumens } }
 local glowLights = {}                -- [vehId] = { light objects }
-local GLOW_CORNERS = { { 0.3, 0.45 }, { 0.3, -0.45 }, { -0.3, 0.45 }, { -0.3, -0.45 } } -- (along, across) fractions
-local GLOW_HEIGHT = 0.4        -- metres above the car's lowest point
-local GLOW_CONE_OUTER = 140    -- degrees: a wide pool of light on the ground, never upwards
-local GLOW_CONE_INNER = 70
+local GLOW_CORNERS = { { 0.3, 0.55 }, { 0.3, -0.55 }, { -0.3, 0.55 }, { -0.3, -0.55 } } -- (along, across) fractions
 
 local function setGlow(json)
   local ok, t = pcall(jsonDecode, json)
@@ -381,26 +378,14 @@ local function removeGlow(vehId)
   glowLights[vehId] = nil
 end
 
--- Set a light field the way the game's own coloured SpotLight (photo-mode flash) does: as a
--- property and through setField. A SpotLight ignores a property-only write of intensity or
--- isEnabled, and with useColorTemperature on it ignores 'color' (stuck on one colour).
-local function lightField(l, name, value)
-  pcall(function() l[name] = value end)
-  l:setField(name, 0, type(value) == 'boolean' and (value and 'true' or 'false') or tostring(value))
-end
-
 local function makeGlow(vehId)
   local lights = {}
   for i = 1, #GLOW_CORNERS do
     local name = 'carradio_glow_' .. vehId .. '_' .. i
     local old = scenetree.findObject(name)
     if old then old:delete() end
-    local l = createObject('SpotLight')
+    local l = createObject('PointLight')
     l.canSave = false
-    l:setField('innerAngle', 0, tostring(GLOW_CONE_INNER))
-    l:setField('outerAngle', 0, tostring(GLOW_CONE_OUTER))
-    l:setField('castShadows', 0, 'false')
-    l:setField('useColorTemperature', 0, 'false')
     l:registerObject(name)
     lights[i] = l
   end
@@ -419,21 +404,18 @@ local function placeGlow(veh, lights, color)
     local axis, half = vec3(box:getAxis(i)), (i == 0 and h.x) or (i == 1 and h.y) or h.z
     hl, hw, hh = hl + math.abs(axis:dot(dir)) * half, hw + math.abs(axis:dot(right)) * half, hh + math.abs(axis:dot(up)) * half
   end
-  local base = c - up * (hh - GLOW_HEIGHT) -- GLOW_HEIGHT above the lowest point (tyres) of the car
-  local range = GLOW_HEIGHT + 2.5
+  local base = c - up * (hh - 0.12) -- just above the lowest point (tyres) of the car
+  -- Light pool: wide enough to spill out from under the sides, but ending short of the car's
+  -- front and back (the lights sit 30 % of the way out, the ends are at 100 %).
+  local radius = math.max(1.5, math.min(hw * 2.2, hl * 0.6, 4))
   local colorStr = string.format('%.3f %.3f %.3f 1', color[1], color[2], color[3])
-  -- Straight down along the car's own up axis (follows the car when it tilts or hops).
-  local rot = quatFromDir(-up, dir):toTorqueQuat()
-  local rotStr = rot.x .. ' ' .. rot.y .. ' ' .. rot.z .. ' ' .. rot.w
   for i, corner in ipairs(GLOW_CORNERS) do
     local l = lights[i]
     l:setPosition(base + dir * (corner[1] * hl) + right * (corner[2] * hw))
-    l:setField('rotation', 0, rotStr)
-    l:setField('useColorTemperature', 0, 'false')
     l:setField('color', 0, colorStr)
-    lightField(l, 'range', range)
-    lightField(l, 'intensity', math.max(0, color[4] or 0))
-    lightField(l, 'isEnabled', (color[4] or 0) > 1)
+    l.radius = radius
+    l.intensity = math.max(0, color[4] or 0)
+    l.isEnabled = (color[4] or 0) > 1
     l:postApply()
   end
 end
