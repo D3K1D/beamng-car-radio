@@ -6,7 +6,7 @@
 // jitter buffer (AudioWorklet) and that car's effects chain; car positions/condition
 // arrive as 'CarRadioState' (camera-relative, ~60 Hz).
 (function () {
-  var VERSION = '0.2.9'
+  var VERSION = '0.2.10'
 
   // =====================================================================================
   // Engine
@@ -230,14 +230,11 @@
       var muffleSetting = c.own ? cfg.muffleOwn : cfg.muffleOthers
       c.muffle.frequency.setTargetAtTime(muffleSetting && !inside && !paused ? 900 : 20000, now, 0.08)
       c.out.gain.setTargetAtTime(1, now, 0.05)
-      // Other cars: their owner's volume and bass setting. Louder with speed (your setting, every
-      // car you hear): also drives each car harder into the output stage as it speeds up (+0 dB
-      // up to 20 km/h, +12 dB at 160 km/h: denser, punchier); the audible level change itself is
-      // the speed stage after the limiter.
+      // Other cars: their owner's volume and bass setting. (Louder with speed is a plain volume
+      // change on the whole mix after the limiter: see the state handler.)
       var bassOn = c.own ? bassEq() : !!r.bass
-      var speedDb = cfg.speedVol && !paused ? Math.max(0, Math.min(1, ((r.speed || 0) * 3.6 - 20) / 140)) * 12 : 0
       var ownerVol = c.own ? 1 : (r.vol != null ? r.vol : 100) / 100
-      c.ownerVol.gain.setTargetAtTime(ownerVol * Math.pow(10, speedDb / 20), now, 0.3)
+      c.ownerVol.gain.setTargetAtTime(ownerVol, now, 0.3)
       // Damage
       var dmgOn = !paused, dpk = r.damagePerKg // damage effects are always on
       if (dpk != null && !dmgOn) {
@@ -425,45 +422,22 @@
       "  }",
       "}",
       "registerProcessor('carradio-player', CarRadioPlayer)",
-      // Output stage ("loudness maximizer"):
-      //  1. Split at 150 Hz (4th order; high = input - low, so it sums back exactly). The bass
-      //     gets its own gentle compressor, so a heavy bass hit turns down the bass, not the song.
-      //  2. Each band is soft-clipped on its own (clean below the knee). Turned up past the clean
-      //     range, the music saturates and keeps getting denser/louder like a cranked car stereo,
-      //     instead of the whole song being turned down on every bass hit (songs mastered into
-      //     the red, e.g. heavy 808s). Clipping the bands apart keeps the bass from chopping the
-      //     vocals riding on it.
-      //  3. A soft clip on the sum, then a 3 ms look-ahead peak limiter at -1 dBFS as a backstop.
-      "function sc(x, k, c) { var a = x < 0 ? -x : x; if (a <= k) return x; var y = k + (c - k) * Math.tanh((a - k) / (c - k)); return x < 0 ? -y : y }",
+      // Output stage: a plain volume, nothing else. The only processing is a safety limiter for
+      // when the volume is turned up past what the sound card can play (above full scale the
+      // waveform would be cut off and crackle): a 3 ms look-ahead peak limiter at -1 dBFS that
+      // does nothing at all until a peak would hit the ceiling. No compression, no bass
+      // processing, no clipping.
       "class CarRadioLimiter extends AudioWorkletProcessor {",
-      "  constructor(o) { super(); this.bandOn = !(o && o.processorOptions && o.processorOptions.singleBand)",
-      "    var cp = (o && o.processorOptions) || {}; this.clipOn = !cp.noClip",
-      "    this.kL = cp.kL || 0.3; this.cL = cp.cL || 0.45; this.kH = cp.kH || 0.45; this.cH = cp.cH || 0.7; this.kS = cp.kS || 0.7",
-      "    var w0 = 2 * Math.PI * 150 / sampleRate, cs = Math.cos(w0), al = Math.sin(w0) / (2 * Math.SQRT1_2), a0 = 1 + al",
-      "    this.b0 = (1 - cs) / 2 / a0; this.b1 = (1 - cs) / a0; this.b2 = this.b0; this.a1 = -2 * cs / a0; this.a2 = (1 - al) / a0",
-      "    this.z = new Float64Array(8)", // 2 channels x 2 cascaded biquads x 2 state values
-      "    var po = (o && o.processorOptions) || {}; this.env = 0; this.gl = 1; this.lowTh = po.lowTh || 0.3",
-      "    this.envAtt = 1 - Math.exp(-1 / (sampleRate * (po.lowAttMs || 2) / 1000)); this.envRel = 1 - Math.exp(-1 / (sampleRate * 0.25))",
+      "  constructor(o) { super()",
       "    this.L = Math.max(64, Math.round(sampleRate * 0.003)); this.R = this.L + 1; this.ceiling = 0.891",
       "    this.d0 = new Float32Array(this.R); this.d1 = new Float32Array(this.R); this.need = new Float32Array(this.R)",
       "    this.dq = new Int32Array(this.R + 1); this.h = 0; this.t = 0; this.n = 0; this.g = 1",
       "    this.att = 1 - Math.exp(-1 / (sampleRate * 0.0015)); this.rel = 1 - Math.exp(-1 / (sampleRate * 0.25)) }",
-      "  lp(x, k) { var z = this.z, y = this.b0 * x + z[k]; z[k] = this.b1 * x - this.a1 * y + z[k + 1]; z[k + 1] = this.b2 * x - this.a2 * y; return y }",
       "  process(inputs, outputs) {",
       "    var inp = inputs[0], out = outputs[0]; if (!out || !out.length) return true",
       "    var frames = out[0].length, L = this.L, R = this.R, Q = R + 1, a = inp && inp[0], b = inp && inp[1] ? inp[1] : a",
       "    for (var i = 0; i < frames; i++) {",
       "      var xl = a ? a[i] : 0, xr = b ? b[i] : 0",
-      "      if (this.bandOn) {",
-      "        var lowL = this.lp(this.lp(xl, 0), 2), lowR = this.lp(this.lp(xr, 4), 6)",
-      "        var lv = Math.max(lowL < 0 ? -lowL : lowL, lowR < 0 ? -lowR : lowR)",
-      "        this.env += (lv - this.env) * (lv > this.env ? this.envAtt : this.envRel)",
-      "        var tgl = this.env > this.lowTh ? this.lowTh / this.env : 1; this.gl += (tgl - this.gl) * (tgl < this.gl ? 0.02 : 0.0005)",
-      "        var hiL = xl - lowL, hiR = xr - lowR; lowL *= this.gl; lowR *= this.gl",
-      "        if (this.clipOn) { lowL = sc(lowL, this.kL, this.cL); lowR = sc(lowR, this.kL, this.cL); hiL = sc(hiL, this.kH, this.cH); hiR = sc(hiR, this.kH, this.cH) }",
-      "        xl = hiL + lowL; xr = hiR + lowR",
-      "      }",
-      "      if (this.clipOn) { xl = sc(xl, this.kS, this.ceiling); xr = sc(xr, this.kS, this.ceiling) }",
       "      var pk = Math.max(xl < 0 ? -xl : xl, xr < 0 ? -xr : xr)",
       "      var need = pk > this.ceiling ? this.ceiling / pk : 1, idx = this.n, slot = idx % R",
       "      var ol = this.d0[slot], or = this.d1[slot], on = idx >= R ? this.need[slot] : 1",
