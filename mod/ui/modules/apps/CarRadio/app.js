@@ -50,7 +50,7 @@
     E.media = function (cmd) { ensureAudio(); bngApi.engineLua('carradio_main.media("' + cmd + '")') }
 
     // ---------------- audio graph
-    var ctx = null, master = null, ownBus = null, othersBus = null, workletReady = null
+    var ctx = null, master = null, ownBus = null, othersBus = null, speedOut = null, workletReady = null
     var chains = E.chains
 
     function ensureAudio() {
@@ -66,7 +66,10 @@
         URL.revokeObjectURL(url)
         var limiter = new AudioWorkletNode(ctx, 'carradio-limiter', { outputChannelCount: [2],
           processorOptions: Object.assign({}, window.__crDebug && window.__crDebug.limiter) }) // tuning overrides: test pages only
-        master.disconnect(); master.connect(limiter); limiter.connect(ctx.destination)
+        // After the limiter (already at the loudest the sound card takes): "Louder with speed"
+        // turns everything down while parked and back up to full as your car speeds up.
+        speedOut = ctx.createGain()
+        master.disconnect(); master.connect(limiter); limiter.connect(speedOut); speedOut.connect(ctx.destination)
         E.limiter = limiter
         E.workletOk = true
         return true
@@ -228,8 +231,9 @@
       c.muffle.frequency.setTargetAtTime(muffleSetting && !inside && !paused ? 900 : 20000, now, 0.08)
       c.out.gain.setTargetAtTime(1, now, 0.05)
       // Other cars: their owner's volume and bass setting. Louder with speed (your setting, every
-      // car you hear): +0 dB up to 20 km/h rising to +12 dB at 160 km/h (~4x as loud), over road
-      // and wind noise. The limiter keeps the loud end from clipping.
+      // car you hear): also drives each car harder into the output stage as it speeds up (+0 dB
+      // up to 20 km/h, +12 dB at 160 km/h: denser, punchier); the audible level change itself is
+      // the speed stage after the limiter.
       var bassOn = c.own ? bassEq() : !!r.bass
       var speedDb = cfg.speedVol && !paused ? Math.max(0, Math.min(1, ((r.speed || 0) * 3.6 - 20) / 140)) * 12 : 0
       var ownerVol = c.own ? 1 : (r.vol != null ? r.vol : 100) / 100
@@ -371,6 +375,14 @@
           if (now - ch.lastAudio > 5000 || (!seen[k] && now - ch.lastAudio > 2000)) destroyChain(k)
         }
         sendGlow(glowColors, now)
+        // Louder with speed, whole mix: -12 dB up to 20 km/h rising to full at 160 km/h, by the
+        // speed of your own car (the wind and road noise you hear).
+        if (speedOut) {
+          var own = null
+          for (var j = 0; j < s.radios.length; j++) if (s.radios[j].k === 'own') own = s.radios[j]
+          var sp = E.cfg.speedVol && !s.paused ? Math.max(0, Math.min(1, (((own && own.speed) || 0) * 3.6 - 20) / 140)) : 1
+          speedOut.gain.setTargetAtTime(Math.pow(10, (-12 + 12 * sp) / 20), ctx.currentTime, 0.4)
+        }
       }
       if (++tick % 15 === 0) updateView(s)
     })
@@ -425,12 +437,20 @@
       "  }",
       "}",
       "registerProcessor('carradio-player', CarRadioPlayer)",
-      // Limiter, two stages:
-      //  1. Bass band (< 150 Hz, 4th-order split; high = input - low, so it sums back exactly)
+      // Output stage ("loudness maximizer"):
+      //  1. Split at 150 Hz (4th order; high = input - low, so it sums back exactly). The bass
       //     gets its own gentle compressor, so a heavy bass hit turns down the bass, not the song.
-      //  2. A 3 ms look-ahead peak limiter at -1 dBFS on the result, transparent below it.
+      //  2. Each band is soft-clipped on its own (clean below the knee). Turned up past the clean
+      //     range, the music saturates and keeps getting denser/louder like a cranked car stereo,
+      //     instead of the whole song being turned down on every bass hit (songs mastered into
+      //     the red, e.g. heavy 808s). Clipping the bands apart keeps the bass from chopping the
+      //     vocals riding on it.
+      //  3. A soft clip on the sum, then a 3 ms look-ahead peak limiter at -1 dBFS as a backstop.
+      "function sc(x, k, c) { var a = x < 0 ? -x : x; if (a <= k) return x; var y = k + (c - k) * Math.tanh((a - k) / (c - k)); return x < 0 ? -y : y }",
       "class CarRadioLimiter extends AudioWorkletProcessor {",
       "  constructor(o) { super(); this.bandOn = !(o && o.processorOptions && o.processorOptions.singleBand)",
+      "    var cp = (o && o.processorOptions) || {}; this.clipOn = !cp.noClip",
+      "    this.kL = cp.kL || 0.3; this.cL = cp.cL || 0.45; this.kH = cp.kH || 0.45; this.cH = cp.cH || 0.7; this.kS = cp.kS || 0.7",
       "    var w0 = 2 * Math.PI * 150 / sampleRate, cs = Math.cos(w0), al = Math.sin(w0) / (2 * Math.SQRT1_2), a0 = 1 + al",
       "    this.b0 = (1 - cs) / 2 / a0; this.b1 = (1 - cs) / a0; this.b2 = this.b0; this.a1 = -2 * cs / a0; this.a2 = (1 - al) / a0",
       "    this.z = new Float64Array(8)", // 2 channels x 2 cascaded biquads x 2 state values
@@ -451,8 +471,11 @@
       "        var lv = Math.max(lowL < 0 ? -lowL : lowL, lowR < 0 ? -lowR : lowR)",
       "        this.env += (lv - this.env) * (lv > this.env ? this.envAtt : this.envRel)",
       "        var tgl = this.env > this.lowTh ? this.lowTh / this.env : 1; this.gl += (tgl - this.gl) * (tgl < this.gl ? 0.02 : 0.0005)",
-      "        xl = xl - lowL + lowL * this.gl; xr = xr - lowR + lowR * this.gl",
+      "        var hiL = xl - lowL, hiR = xr - lowR; lowL *= this.gl; lowR *= this.gl",
+      "        if (this.clipOn) { lowL = sc(lowL, this.kL, this.cL); lowR = sc(lowR, this.kL, this.cL); hiL = sc(hiL, this.kH, this.cH); hiR = sc(hiR, this.kH, this.cH) }",
+      "        xl = hiL + lowL; xr = hiR + lowR",
       "      }",
+      "      if (this.clipOn) { xl = sc(xl, this.kS, this.ceiling); xr = sc(xr, this.kS, this.ceiling) }",
       "      var pk = Math.max(xl < 0 ? -xl : xl, xr < 0 ? -xr : xr)",
       "      var need = pk > this.ceiling ? this.ceiling / pk : 1, idx = this.n, slot = idx % R",
       "      var ol = this.d0[slot], or = this.d1[slot], on = idx >= R ? this.need[slot] : 1",
@@ -498,7 +521,7 @@
   <div class="cr-sec">Sound</div>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.muffleOwn" ng-change="E.saveCfg()"> Muffle my car when viewed from outside</label>
   <label class="cr-row"><input type="checkbox" ng-model="E.cfg.muffleOthers" ng-change="E.saveCfg()"> Muffle other cars from outside</label>
-  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.speedVol" ng-change="E.saveCfg()"> Louder with speed (up to 4x as loud at 160 km/h)</label>
+  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.speedVol" ng-change="E.saveCfg()"> Louder with speed (quieter when parked, full blast at 160 km/h)</label>
   <div ng-if="E.view.mp">
     <div class="cr-sec">Convoy DJ</div>
     <div class="cr-hint">Play in my car (everyone hears it from your car):</div>
