@@ -6,7 +6,7 @@
 // jitter buffer (AudioWorklet) and that car's effects chain; car positions/condition
 // arrive as 'CarRadioState' (camera-relative, ~60 Hz).
 (function () {
-  var VERSION = '0.2.7'
+  var VERSION = '0.2.8'
 
   // =====================================================================================
   // Engine
@@ -526,7 +526,7 @@
     <div class="cr-hint" ng-if="!E.view.djs.length">No other radios playing yet. Players appear here once their music is on.</div>
   </div>
   <div class="cr-sec">Party</div>
-  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.lights" ng-change="E.saveCfg()"> Underglow light show (colours pulse to the music)</label>
+  <label class="cr-row"><input type="checkbox" ng-model="E.cfg.lights" ng-change="E.saveCfg()"> Light show: underglow + interior glow (colours pulse to the music)</label>
   <div class="cr-row" ng-if="E.cfg.lights"><span class="cr-lbl">Idle colour</span>
     <button class="cr-swatch" ng-repeat="col in ['#8a2be2', '#1e6bff', '#00d5ff', '#00ff6a', '#ff2a2a', '#ff3db8', '#ff9a00', '#ffffff']"
       ng-style="{background: col}" ng-class="{on: E.cfg.glowColor === col}" ng-click="E.cfg.glowColor = col; E.saveCfg()" title="Glow colour when the music is quiet"></button></div>

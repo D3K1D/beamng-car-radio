@@ -14,7 +14,7 @@ local socket = require('socket')
 local mime = require('mime')
 
 local logTag = 'carradio'
-local VERSION = '0.2.7'
+local VERSION = '0.2.8'
 local PROTO = 1
 local LINK_PORT = 38742
 
@@ -358,15 +358,21 @@ local function mpUpdate(now)
 end
 
 -- ---------------------------------------------------------------- underglow (light show)
--- Four invisible point lights under each car with the light show on, just above the ground
--- (from the car's own bounding box and axes, so any vehicle works) - the 0.2.1 underglow.
--- They sit well inside the bumpers with a light pool that ends before the car's ends, so the
--- headlights and tail lights are never lit.
+-- Invisible point lights for each car with the light show on, all from the car's own bounding
+-- box and axes, so any vehicle works:
+--  * Underglow: four just above the ground (the 0.2.1 underglow), well inside the bumpers
+--    with a light pool that ends before the car's ends, so headlights and tail lights stay unlit.
+--  * Cabin glow: one to five along the middle of the cabin (more for longer vehicles, so a bus
+--    glows end to end). They cast shadows, so the car's own body keeps their light inside and
+--    it only shows through the windows.
 -- The app decides colour and brightness from that car's music (an idle colour when silent);
--- every player's game draws the underglow for every car, in time with what each hears.
+-- every player's game draws the glow for every car, in time with what each hears.
 local glowTargets, glowAt = {}, -100 -- from the app: { [carKey] = { r, g, b, lumens } }
-local glowLights = {}                -- [vehId] = { light objects }
+local glowLights = {}                -- [vehId] = { light objects: underglow first, then cabin }
 local GLOW_CORNERS = { { 0.3, 0.55 }, { 0.3, -0.55 }, { -0.3, 0.55 }, { -0.3, -0.55 } } -- (along, across) fractions
+local CABIN_SPACING = 3.5  -- metres of vehicle length per cabin light
+local CABIN_MAX = 5
+local CABIN_BRIGHTNESS = 0.35 -- of the underglow's: a small enclosed space
 
 local function setGlow(json)
   local ok, t = pcall(jsonDecode, json)
@@ -378,14 +384,34 @@ local function removeGlow(vehId)
   glowLights[vehId] = nil
 end
 
-local function makeGlow(vehId)
+-- The car's centre, axes and half length / width / height along its own axes.
+local function carFrame(veh)
+  local box = veh:getSpawnWorldOOBB()
+  local c, h = vec3(box:getCenter()), box:getHalfExtents()
+  local dir, up = vec3(veh:getDirectionVector()), vec3(veh:getDirectionVectorUp())
+  local right = dir:cross(up)
+  local hl, hw, hh = 0, 0, 0
+  for i = 0, 2 do
+    local axis, half = vec3(box:getAxis(i)), (i == 0 and h.x) or (i == 1 and h.y) or h.z
+    hl, hw, hh = hl + math.abs(axis:dot(dir)) * half, hw + math.abs(axis:dot(right)) * half, hh + math.abs(axis:dot(up)) * half
+  end
+  return c, dir, up, right, hl, hw, hh
+end
+
+local function cabinCount(hl)
+  return math.max(1, math.min(CABIN_MAX, math.floor(2 * hl / CABIN_SPACING + 0.5)))
+end
+
+local function makeGlow(vehId, nCabin)
+  removeGlow(vehId)
   local lights = {}
-  for i = 1, #GLOW_CORNERS do
+  for i = 1, #GLOW_CORNERS + nCabin do
     local name = 'carradio_glow_' .. vehId .. '_' .. i
     local old = scenetree.findObject(name)
     if old then old:delete() end
     local l = createObject('PointLight')
     l.canSave = false
+    if i > #GLOW_CORNERS then l:setField('castShadows', 0, 'true') end -- cabin: stays inside the body
     l:registerObject(name)
     lights[i] = l
   end
@@ -393,30 +419,39 @@ local function makeGlow(vehId)
   return lights
 end
 
-local function placeGlow(veh, lights, color)
-  local box = veh:getSpawnWorldOOBB()
-  local c, h = vec3(box:getCenter()), box:getHalfExtents()
-  local dir, up = vec3(veh:getDirectionVector()), vec3(veh:getDirectionVectorUp())
-  local right = dir:cross(up)
-  -- Half length / width / height of the box along the car's own axes.
-  local hl, hw, hh = 0, 0, 0
-  for i = 0, 2 do
-    local axis, half = vec3(box:getAxis(i)), (i == 0 and h.x) or (i == 1 and h.y) or h.z
-    hl, hw, hh = hl + math.abs(axis:dot(dir)) * half, hw + math.abs(axis:dot(right)) * half, hh + math.abs(axis:dot(up)) * half
-  end
-  local base = c - up * (hh - 0.12) -- just above the lowest point (tyres) of the car
-  -- Light pool: wide enough to spill out from under the sides, but ending short of the car's
-  -- front and back (the lights sit 30 % of the way out, the ends are at 100 %).
-  local radius = math.max(1.5, math.min(hw * 2.2, hl * 0.6, 4))
+local function setLight(l, pos, colorStr, radius, lumens)
+  l:setPosition(pos)
+  l:setField('color', 0, colorStr)
+  l.radius = radius
+  l.intensity = lumens
+  l.isEnabled = lumens > 1
+  l:postApply()
+end
+
+local function placeGlow(veh, vehId, color)
+  local c, dir, up, right, hl, hw, hh = carFrame(veh)
+  local nCabin = cabinCount(hl)
+  local lights = glowLights[vehId]
+  if not lights or #lights ~= #GLOW_CORNERS + nCabin then lights = makeGlow(vehId, nCabin) end
   local colorStr = string.format('%.3f %.3f %.3f 1', color[1], color[2], color[3])
+  local lumens = math.max(0, color[4] or 0)
+  -- Underglow: just above the lowest point (tyres). Light pool wide enough to spill out from
+  -- under the sides, but ending short of the car's front and back (lights at 30 % out).
+  local base = c - up * (hh - 0.12)
+  local radius = math.max(1.5, math.min(hw * 2.2, hl * 0.6, 4))
   for i, corner in ipairs(GLOW_CORNERS) do
-    local l = lights[i]
-    l:setPosition(base + dir * (corner[1] * hl) + right * (corner[2] * hw))
-    l:setField('color', 0, colorStr)
-    l.radius = radius
-    l.intensity = math.max(0, color[4] or 0)
-    l.isEnabled = (color[4] or 0) > 1
-    l:postApply()
+    setLight(lights[i], base + dir * (corner[1] * hl) + right * (corner[2] * hw), colorStr, radius, lumens)
+  end
+  -- Cabin: on the centreline a little above the box's middle (seat / window height), spread
+  -- evenly along the length (middle 50 %, or 60 % for buses); each pool covers its share of
+  -- the cabin but always ends at least 10 % short of the vehicle's ends (headlights).
+  local mid = c + up * (hh * 0.15)
+  local span = nCabin > 1 and hl * (nCabin >= 3 and 0.6 or 0.5) or 0
+  local spacing = nCabin > 1 and 2 * span / (nCabin - 1) or 0
+  local cabinRadius = math.max(1.2, math.min(3, hl * 0.9 - span, math.max(hw * 1.2, spacing * 0.6)))
+  for j = 1, nCabin do
+    local along = nCabin > 1 and (-span + (j - 1) * spacing) or 0
+    setLight(lights[#GLOW_CORNERS + j], mid + dir * along, colorStr, cabinRadius, lumens * CABIN_BRIGHTNESS)
   end
 end
 
@@ -432,7 +467,7 @@ local function updateGlow(now)
     local veh = vehId and be:getObjectByID(vehId)
     if veh and type(color) == 'table' then
       wanted[vehId] = true
-      local ok = pcall(placeGlow, veh, glowLights[vehId] or makeGlow(vehId), color)
+      local ok = pcall(placeGlow, veh, vehId, color)
       if not ok then removeGlow(vehId) end
     end
   end
