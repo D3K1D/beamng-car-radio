@@ -14,7 +14,7 @@ local socket = require('socket')
 local mime = require('mime')
 
 local logTag = 'carradio'
-local VERSION = '0.1.0'
+local VERSION = '0.1.1'
 local PROTO = 1
 local LINK_PORT = 38742
 
@@ -224,15 +224,27 @@ local function setRadioVehicle(veh)
   if veh then vehInfo[radio.vehId] = nil; requestVehicleInfo(veh, true) end
 end
 
--- Called by the UI play button.
-local function setOn(on)
-  radio.on = on and true or false
-  if radio.on then
+-- The radio is on whenever the companion is capturing: like a real car stereo, pausing the
+-- music (media buttons) is what silences it. It sits in the car you are driving.
+local function updateRadioPower()
+  local want = link.status and link.status.capturing and true or false
+  if want and not radio.on then
+    radio.on = true
     setRadioVehicle(currentDrivableVehicle())
-  else
+    log('I', logTag, 'radio on in vehicle ' .. tostring(radio.vehId))
+  elseif not want and radio.on then
+    radio.on = false
     setRadioVehicle(nil)
+    log('I', logTag, 'radio off')
+  elseif radio.on and not radio.vehId then
+    local veh = currentDrivableVehicle() -- e.g. was on foot when capture started
+    if veh then setRadioVehicle(veh) end
   end
-  log('I', logTag, 'radio ' .. (radio.on and ('on in vehicle ' .. tostring(radio.vehId)) or 'off'))
+end
+
+-- Media buttons in the app: play/pause, next, previous on the captured program.
+local function media(cmd)
+  if cmd == 'playpause' or cmd == 'next' or cmd == 'prev' then linkSend(0x12, jsonEncode({ cmd = cmd })) end
 end
 
 -- The radio moves with you into another car (not into the walking character).
@@ -254,10 +266,19 @@ local function setBass(x, mult)
 end
 
 -- ---------------------------------------------------------------- BeamMP
-local mp = { config = nil, nextHello = 0, handlersAdded = false, remotes = {} } -- remotes[key] = lastPacketTime
+-- remotes[key] = last packet time; remoteMeta[key] = { vol, bass } as set by that car's owner.
+local mp = { config = nil, nextHello = 0, handlersAdded = false, remotes = {}, remoteMeta = {} }
+-- This player's radio settings (from the app), shared so everyone hears a car at its owner's volume.
+local ownMeta = { vol = 100, bass = false }
+local metaSent = { json = nil, at = -100 }
 
 local function inMP()
   return MPCoreNetwork and MPCoreNetwork.isMPSession and MPCoreNetwork.isMPSession() and true or false
+end
+
+local function setMeta(vol, bass)
+  ownMeta.vol = math.max(0, math.min(1000, tonumber(vol) or 100))
+  ownMeta.bass = bass and true or false
 end
 
 local function mpUpdate(now)
@@ -274,6 +295,14 @@ local function mpUpdate(now)
         log('I', logTag, 'server relay: ' .. tostring(cfg.relay))
       end
     end, 'carradio') -- named, so a Lua reload replaces the handler instead of adding another
+    -- Other players' radio settings, relayed by the server plugin with the sender's player ID.
+    AddEventHandler('carradio_meta', function(data)
+      local ok, m = pcall(jsonDecode, data)
+      if not ok or type(m) ~= 'table' or type(m.key) ~= 'string' or m.pid == nil then return end
+      -- A player may only describe their own cars: keys are "<playerID>-<vehicleID>".
+      if m.key:sub(1, #tostring(m.pid) + 1) ~= tostring(m.pid) .. '-' then return end
+      mp.remoteMeta[m.key] = { vol = math.max(0, math.min(1000, tonumber(m.vol) or 100)), bass = m.bass and true or false }
+    end, 'carradio')
     mp.handlersAdded = true
   end
   if not mp.config then
@@ -286,6 +315,14 @@ local function mpUpdate(now)
   local key = ''
   if radio.on and radio.vehId and getServerVehicleID then key = getServerVehicleID(radio.vehId) or '' end
   sendSession({ relay = mp.config.relay, secret = mp.config.secret, key = key })
+  -- Share this car's volume/bass: on change (at most twice a second) and every 5 s for late joiners.
+  if key ~= '' and TriggerServerEvent then
+    local json = jsonEncode({ key = key, vol = ownMeta.vol, bass = ownMeta.bass })
+    if (json ~= metaSent.json and now - metaSent.at > 0.5) or now - metaSent.at > 5 then
+      TriggerServerEvent('carradio_meta', json)
+      metaSent.json, metaSent.at = json, now
+    end
+  end
 end
 
 -- ---------------------------------------------------------------- per frame
@@ -305,6 +342,7 @@ local function onUpdate(dtReal)
   sinceSend = sinceSend + dtReal
   if sinceSend < sendInterval then return end
   sinceSend = 0
+  updateRadioPower()
   mpUpdate(now)
 
   local cam = {
@@ -314,7 +352,9 @@ local function onUpdate(dtReal)
   local state = {
     paused = simTimeAuthority.getPause() and true or false,
     companion = link.sock and { version = link.hello and link.hello.version, source = link.status and link.status.source,
-      capturing = link.status and link.status.capturing or false } or false,
+      capturing = link.status and link.status.capturing or false,
+      title = link.status and link.status.title, artist = link.status and link.status.artist,
+      playing = link.status and link.status.playing } or false,
     relay = link.relay or false,
     mp = inMP(),
     radioOn = radio.on,
@@ -337,6 +377,8 @@ local function onUpdate(dtReal)
       if veh then
         local r = radioState(veh, cam)
         r.k = key
+        local meta = mp.remoteMeta[key]
+        if meta then r.vol, r.bass = meta.vol, meta.bass end
         state.radios[#state.radios + 1] = r
       end
     end
@@ -355,7 +397,8 @@ M.onVehicleSwitched = onVehicleSwitched
 M.onVehicleReplaced = onVehicleReplaced
 M.onVehicleSpawned = onVehicleReplaced
 M.onVehicleMass = onVehicleMass
-M.setOn = setOn
+M.media = media
+M.setMeta = setMeta
 M.setBass = setBass
 
 return M

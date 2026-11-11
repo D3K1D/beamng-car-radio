@@ -68,7 +68,8 @@ public sealed class AudioCapture : IDisposable
         var psi = new ProcessStartInfo(HelperPath, $"--pid {program.Pid}")
         {
             RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
-            UseShellExecute = false, CreateNoWindow = true
+            UseShellExecute = false, CreateNoWindow = true,
+            StandardInputEncoding = new System.Text.UTF8Encoding(false), // no byte-order mark before commands
         };
         _proc = Process.Start(psi) ?? throw new InvalidOperationException("appcapture.exe did not start");
         _cts = new CancellationTokenSource();

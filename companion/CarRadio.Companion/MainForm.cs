@@ -12,7 +12,7 @@ public sealed class MainForm : Form
     readonly Button _refresh = new() { Text = "↻", Width = 34 };
     readonly Button _startStop = new() { Text = "Start", Width = 90, Height = 30 };
     readonly Label _gameStatus = new() { AutoSize = true, Text = "BeamNG: waiting for the game…" };
-    readonly Label _sourceStatus = new() { AutoSize = true, Text = "Not capturing" };
+    readonly Label _sourceStatus = new() { AutoSize = true, MaximumSize = new Size(300, 0), Text = "Not capturing" };
     readonly ProgressBar _meter = new() { Width = 290, Height = 10, Maximum = 100 };
     readonly CheckBox _duck = new() { AutoSize = true, Checked = true, Text = "Silence the program on my speakers while in game" };
     readonly NotifyIcon _tray = new();
@@ -21,6 +21,7 @@ public sealed class MainForm : Form
     readonly OpusStream _opus = new();
     readonly GameLink _link = new();
     readonly RelayClient _relay = new();
+    readonly MediaControl _media = new();
     readonly Label _mpStatus = new() { AutoSize = true, Text = "Multiplayer: not on a CarRadio server" };
     float _level;
     readonly System.Windows.Forms.Timer _statusTimer = new() { Interval = 500 };
@@ -30,7 +31,7 @@ public sealed class MainForm : Form
         Text = $"CarRadio Companion {AppInfo.Version}";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(330, 210);
+        ClientSize = new Size(330, 230);
         Font = new Font("Segoe UI", 9f);
         Icon = SystemIcons.Application;
 
@@ -86,10 +87,25 @@ public sealed class MainForm : Form
             UpdateDuck();
         });
 
-        _statusTimer.Tick += (_, _) =>
+        // Media buttons in the game control the captured program (Spotify, YouTube in Chrome, ...).
+        _link.MediaCommand += cmd => BeginInvoke(async () =>
+        {
+            await _media.CommandAsync(cmd, _capture.Program?.Exe);
+            await Task.Delay(300);
+            await _media.RefreshAsync(_capture.Program?.Exe);
+        });
+
+        int ticks = 0;
+        _statusTimer.Tick += async (_, _) =>
         {
             _meter.Value = Math.Clamp((int)(_level * 100), 0, 100);
-            _link.SendStatus(_capture.Program?.Exe, _capture.Running, _level);
+            if (++ticks % 2 == 0 && _capture.Running)
+            {
+                await _media.RefreshAsync(_capture.Program?.Exe);
+                var song = _media.Title == null ? null : (_media.Artist != null ? $"{_media.Artist} – {_media.Title}" : _media.Title);
+                _sourceStatus.Text = $"Capturing {_capture.Program?.Exe}" + (song != null ? $": {song}" : "");
+            }
+            _link.SendStatus(_capture.Program?.Exe, _capture.Running, _level, _media.Title, _media.Artist, _media.Playing);
         };
 
         Load += (_, _) =>
@@ -102,6 +118,7 @@ public sealed class MainForm : Form
                 Close();
                 return;
             }
+            _ = _media.InitAsync();
             _statusTimer.Start();
             RefreshPrograms();
         };

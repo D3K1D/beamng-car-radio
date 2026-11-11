@@ -14,7 +14,10 @@ public sealed class GameLink : IDisposable
     public const int Port = 38742;
     public const int Proto = 1;
 
-    const byte HelloOut = 0x01, Opus = 0x02, Status = 0x03, Remote = 0x04, RelayState = 0x05, HelloIn = 0x10, Session = 0x11;
+    const byte HelloOut = 0x01, Opus = 0x02, Status = 0x03, Remote = 0x04, RelayState = 0x05, HelloIn = 0x10, Session = 0x11, Control = 0x12;
+
+    /// <summary>Media command from the game: "playpause", "next" or "prev".</summary>
+    public event Action<string>? MediaCommand;
 
     /// <summary>(relay "host:port" or null, secret, key) from the game's SESSION message.</summary>
     public event Action<string?, string?, string?>? SessionChanged;
@@ -79,6 +82,15 @@ public sealed class GameLink : IDisposable
                     }
                     catch (JsonException) { }
                 }
+                else if (body[0] == Control)
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(body.AsMemory(1));
+                        if (doc.RootElement.TryGetProperty("cmd", out var c) && c.GetString() is string cmd) MediaCommand?.Invoke(cmd);
+                    }
+                    catch (JsonException) { }
+                }
                 else if (body[0] == Session)
                 {
                     try
@@ -112,8 +124,8 @@ public sealed class GameLink : IDisposable
         }
     }
 
-    public void SendStatus(string? source, bool capturing, float level) =>
-        SendJson(Status, new { source, capturing, level });
+    public void SendStatus(string? source, bool capturing, float level, string? title = null, string? artist = null, bool? playing = null) =>
+        SendJson(Status, new { source, capturing, level, title, artist, playing });
 
     readonly byte[] _remoteFrame = new byte[4 + 1 + 1 + 32 + 4 + 4000];
 

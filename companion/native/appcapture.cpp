@@ -93,7 +93,7 @@ static bool inTree(DWORD pid, DWORD root, const std::map<DWORD, ProcInfo> &procs
 }
 
 // ---- audio session enumeration across all active render devices ----
-struct SessionRef { DWORD pid; AudioSessionState state; ISimpleAudioVolume *volume; std::wstring device; };
+struct SessionRef { DWORD pid; AudioSessionState state; ISimpleAudioVolume *volume; std::wstring device; std::wstring instance; };
 
 static std::vector<SessionRef> enumerateSessions() {
   std::vector<SessionRef> out;
@@ -117,7 +117,9 @@ static std::vector<SessionRef> enumerateSessions() {
               DWORD pid = 0; ctl2->GetProcessId(&pid);
               AudioSessionState st = AudioSessionStateInactive; ctl2->GetState(&st);
               ISimpleAudioVolume *vol = nullptr; ctl->QueryInterface(__uuidof(ISimpleAudioVolume), (void **)&vol);
-              if (pid) out.push_back({pid, st, vol, devId ? devId : L""}); else if (vol) vol->Release();
+              LPWSTR inst = nullptr; ctl2->GetSessionInstanceIdentifier(&inst);
+              if (pid) out.push_back({pid, st, vol, devId ? devId : L"", inst ? inst : L""}); else if (vol) vol->Release();
+              if (inst) CoTaskMemFree(inst);
               ctl2->Release();
             }
             ctl->Release();
@@ -182,7 +184,8 @@ static BOOL WINAPI onCtrl(DWORD) { g_stop = true; return TRUE; }
 // also silences process-loopback capture), and put it back afterwards.
 // Windows remembers per-app volume, so original volumes are also saved to a file and
 // restored on the next run if this process ever dies while a program is ducked.
-struct Ducked { ISimpleAudioVolume *vol; float original; DWORD pid; std::wstring exe; };
+// Tracked per audio SESSION (a program has one per output device it uses), not per process.
+struct Ducked { ISimpleAudioVolume *vol; float original; DWORD pid; std::wstring exe; std::wstring instance; };
 static std::vector<Ducked> g_ducked;
 
 static std::wstring restoreFilePath() {
@@ -233,15 +236,15 @@ static void duckTree(DWORD root, float level) {
   for (auto &s : enumerateSessions()) {
     bool mine = s.volume && inTree(s.pid, root, procs);
     bool already = false;
-    for (auto &d : g_ducked) if (d.pid == s.pid) { already = true; break; }
+    for (auto &d : g_ducked) if (d.instance == s.instance) { already = true; break; }
     if (mine && !already) {
       float orig = 1.0f; s.volume->GetMasterVolume(&orig);
       auto it = procs.find(s.pid);
-      g_ducked.push_back({s.volume, orig, s.pid, it != procs.end() ? it->second.exe : L""});
+      g_ducked.push_back({s.volume, orig, s.pid, it != procs.end() ? it->second.exe : L"", s.instance});
       s.volume->SetMasterVolume(level * orig, nullptr);
       continue; // keep the reference
     }
-    if (mine && already) for (auto &d : g_ducked) if (d.pid == s.pid) d.vol->SetMasterVolume(level * d.original, nullptr);
+    if (mine && already) for (auto &d : g_ducked) if (d.instance == s.instance) d.vol->SetMasterVolume(level * d.original, nullptr);
     if (s.volume) s.volume->Release();
   }
   saveRestoreFile();
@@ -296,9 +299,12 @@ static int capture(DWORD targetPid, float startDuck) {
   std::thread([] {
     char line[128];
     while (fgets(line, sizeof(line), stdin)) {
+      // Skip anything before the command word (e.g. a UTF-8 byte-order mark some writers add).
+      char *cmd = line;
+      while (*cmd && !(*cmd >= 'a' && *cmd <= 'z')) cmd++;
       float lv;
-      if (sscanf(line, "duck %f", &lv) == 1 && lv > 0 && lv <= 1) g_duckRequest = lv;
-      else if (strncmp(line, "unduck", 6) == 0) g_duckRequest = 1.0f;
+      if (sscanf(cmd, "duck %f", &lv) == 1 && lv > 0 && lv <= 1) g_duckRequest = lv;
+      else if (strncmp(cmd, "unduck", 6) == 0) g_duckRequest = 1.0f;
     }
     g_stop = true;
   }).detach();
